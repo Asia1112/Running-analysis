@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.idea/
+.git_broken_backup*/
+
+*.mp4
+run_landmarks*.csv
+angles.csv
+pose_quality_frame.jpg
+pose_quality_checks/
