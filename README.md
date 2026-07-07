@@ -65,6 +65,12 @@ Generate a user-facing report:
 .\.venv\Scripts\python.exe generate_report.py --csv run_landmarks.csv --source-name video.mp4 --markdown report.md --json report.json
 ```
 
+Start the upload app:
+
+```powershell
+.\.venv\Scripts\streamlit.exe run app.py
+```
+
 Plot knee angles:
 
 ```powershell
