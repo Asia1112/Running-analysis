@@ -6,6 +6,9 @@ __pycache__/
 
 *.mp4
 run_landmarks*.csv
+report*.json
+report*.md
 angles.csv
 pose_quality_frame.jpg
 pose_quality_checks/
+metrics_checks/
