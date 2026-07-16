@@ -4,6 +4,7 @@ import altair as alt
 import streamlit as st
 
 from src.running_biomechanics.analysis import analyze_csv, validate_knee_rom
+from src.running_biomechanics.extended_analysis import analyze_extended_metrics
 from src.running_biomechanics.pose_extraction import process_video
 from src.running_biomechanics.report import build_report, report_to_markdown
 
@@ -324,6 +325,9 @@ def run_analysis(video_path, crop_mode):
     validation = validate_knee_rom(str(csv_path))
     validation["debug_frames_dir"] = processing_stats["debug_frames_dir"]
     validation["debug_frames_count"] = processing_stats["debug_frames_count"]
+    report["extended_metrics"] = analyze_extended_metrics(
+        str(csv_path), result=result, validation=validation
+    )
     if validation["tracking_error"]:
         if report["status"] == "usable":
             report["status"] = "needs_review"
@@ -351,7 +355,7 @@ def extrema_caption(extrema):
 
 
 def render_rom_validation(validation):
-    st.markdown("### Walidacja ROM kolan")
+    st.markdown("### 3. Kolana")
 
     if validation["tracking_error"]:
         st.error(
@@ -404,6 +408,20 @@ def render_rom_validation(validation):
     st.caption(
         "Linia ciągła: dane surowe · linia przerywana: dane wygładzone · "
         "czerwone punkty: zmiana kąta większa niż 30°."
+    )
+
+    left_side = validation["sides"]["left"]
+    right_side = validation["sides"]["right"]
+    raw_difference = abs(left_side["raw_rom_deg"] - right_side["raw_rom_deg"])
+    smoothed_difference = abs(
+        left_side["smoothed_rom_deg"] - right_side["smoothed_rom_deg"]
+    )
+    summary_columns = st.columns(3)
+    summary_columns[0].metric("Różnica ROM L/P — surowa", f"{raw_difference:.1f}°")
+    summary_columns[1].metric("Różnica ROM L/P — wygładzona", f"{smoothed_difference:.1f}°")
+    summary_columns[2].metric(
+        "Stabilność ROM po wygładzeniu",
+        "Podejrzana" if validation["tracking_error"] else "Stabilna",
     )
 
     side_columns = st.columns(2)
@@ -462,6 +480,154 @@ def render_rom_validation(validation):
         f"Wyeksportowano {validation['debug_frames_count']} oznaczonych klatek do: "
         f"{validation['debug_frames_dir']}"
     )
+
+
+def display_value(value, suffix="", digits=1):
+    if value is None:
+        return "Brak danych"
+    return f"{value:.{digits}f}{suffix}"
+
+
+def render_angle_chart(series, y_title):
+    color = alt.Color(
+        "side_label:N",
+        title="Strona",
+        scale=alt.Scale(domain=["Lewa", "Prawa"], range=["#ff7a2f", "#65d44d"]),
+    )
+    base = alt.Chart(alt.Data(values=series)).encode(
+        x=alt.X("time_s:Q", title="Czas [s]"),
+        color=color,
+    )
+    raw = base.mark_line(strokeWidth=1.3, opacity=0.45).encode(
+        y=alt.Y("angle_raw_deg:Q", title=y_title),
+        tooltip=[
+            alt.Tooltip("time_s:Q", title="Czas [s]", format=".3f"),
+            alt.Tooltip("side_label:N", title="Strona"),
+            alt.Tooltip("angle_raw_deg:Q", title="Kąt surowy [°]", format=".1f"),
+        ],
+    )
+    smooth = base.mark_line(strokeWidth=2.5).encode(
+        y=alt.Y("angle_smoothed_deg:Q", title=y_title),
+        tooltip=[
+            alt.Tooltip("time_s:Q", title="Czas [s]", format=".3f"),
+            alt.Tooltip("side_label:N", title="Strona"),
+            alt.Tooltip("angle_smoothed_deg:Q", title="Kąt wygładzony [°]", format=".1f"),
+        ],
+    )
+    st.altair_chart((raw + smooth).interactive())
+
+
+def render_analysis_quality(details):
+    st.markdown("### 1. Jakość analizy")
+    quality = details["quality"]
+    columns = st.columns(3)
+    columns[0].metric("Widoczność głównych punktów", f"{details['core_visible_pct']:.1f}%")
+    columns[1].metric("Podejrzane klatki", quality["suspicious_frame_count"])
+    columns[2].metric(
+        "Stabilność kątów kolan",
+        display_value(quality["angle_stability_pct"], "%"),
+    )
+    st.caption(
+        "Stabilność oznacza odsetek kolejnych klatek, w których zmiana kąta nie przekracza 10°."
+    )
+    with st.expander("Widoczność poszczególnych punktów"):
+        st.dataframe(
+            quality["landmarks"],
+            column_config={
+                "punkt": "Punkt",
+                "mean_visibility": st.column_config.NumberColumn("Średnia visibility", format="%.2f"),
+                "visible_pct": st.column_config.ProgressColumn(
+                    "Klatki z visibility ≥ 0.65", min_value=0, max_value=100, format="%.1f%%"
+                ),
+            },
+            hide_index=True,
+        )
+
+
+def render_cadence_section(report, extended):
+    st.markdown("### 2. Kadencja i rytm")
+    metrics = report["metrics"]
+    cadence = extended["cadence"]
+    columns = st.columns(4)
+    columns[0].metric("Kadencja ogólna", f"{metrics['cadence_spm']:.1f} kroków/min")
+    columns[1].metric("Kadencja L", f"{metrics['cadence_left_spm']:.1f} kroków/min")
+    columns[2].metric("Kadencja P", f"{metrics['cadence_right_spm']:.1f} kroków/min")
+    columns[3].metric(
+        "Regularność kroków",
+        cadence["regularity_label"].capitalize(),
+        display_value(cadence["regularity_cv_pct"], "% CV"),
+    )
+    st.caption(
+        "Niższy współczynnik zmienności (CV) odstępów między krokami oznacza bardziej regularny rytm. "
+        "Wynik wymaga co najmniej trzech wykrytych zdarzeń na stronę."
+    )
+
+
+def render_hip_section(hips):
+    st.markdown("### 4. Biodra")
+    if not hips["available"]:
+        st.warning("Widoczność barków, bioder lub kolan jest zbyt niska dla wiarygodnego ROM bioder.")
+        return
+    render_angle_chart(hips["series"], "Kąt biodra [°]")
+    columns = st.columns(3)
+    columns[0].metric("ROM biodra L", display_value(hips["left"]["smoothed_rom_deg"], "°"))
+    columns[1].metric("ROM biodra P", display_value(hips["right"]["smoothed_rom_deg"], "°"))
+    columns[2].metric("Różnica L/P", display_value(hips["rom_difference_deg"], "°"))
+    st.caption("Kąt biodra jest liczony w 2D z punktów bark–biodro–kolano; pokazany ROM używa danych wygładzonych.")
+
+
+def render_trunk_section(trunk):
+    st.markdown("### 5. Tułów")
+    columns = st.columns(3)
+    columns[0].metric("Średnie pochylenie", display_value(trunk["mean_deg"], "°"))
+    columns[1].metric("Zmienność pochylenia", display_value(trunk["std_deg"], "° SD"))
+    columns[2].metric("Stabilność sylwetki", display_value(trunk["stability_pct"], "%"))
+    st.caption("Stabilność oznacza odsetek zmian między klatkami nieprzekraczających 3°.")
+
+
+def render_technique_section(technique):
+    st.markdown("### 6. Wskaźniki techniki")
+    columns = st.columns(3)
+    if technique["overstriding_available"]:
+        columns[0].metric(
+            "Możliwy overstriding",
+            "Tak" if technique["possible_overstriding"] else "Nie wykryto",
+            display_value(technique["overstriding_offset_leg_ratio"], " długości podudzia", 2),
+        )
+    else:
+        columns[0].metric("Możliwy overstriding", "Brak wiarygodnej oceny")
+    if technique["contact_available"]:
+        columns[1].metric(
+            "Kąt piszczeli przy kontakcie L/P",
+            f"{display_value(technique['shin_angle_left_deg'], '°')} / "
+            f"{display_value(technique['shin_angle_right_deg'], '°')}",
+        )
+    else:
+        columns[1].metric("Kąt piszczeli przy kontakcie", "Brak wiarygodnej oceny")
+    columns[2].metric(
+        "Oscylacja pionowa bioder",
+        display_value(technique["vertical_hip_oscillation_pct_torso"], "% długości tułowia"),
+    )
+    st.info(technique["note"])
+    if not technique["direction_available"]:
+        st.caption("Overstriding ukryto, ponieważ z nagrania nie można pewnie ustalić kierunku przemieszczania się biegacza.")
+
+
+def render_arms_section(arms):
+    st.markdown("### 7. Praca ramion")
+    if not arms["available"]:
+        st.warning(
+            "Brak wystarczająco widocznych łokci i nadgarstków. Nowe analizy zapisują te punkty; "
+            "dla starszego pliku CSV trzeba ponownie przetworzyć film."
+        )
+        return
+    render_angle_chart(arms["series"], "Kąt łokcia [°]")
+    columns = st.columns(4)
+    columns[0].metric("ROM ramienia L", display_value(arms["left_arm_rom_deg"], "°"))
+    columns[1].metric("ROM ramienia P", display_value(arms["right_arm_rom_deg"], "°"))
+    columns[2].metric("Różnica ROM", display_value(arms["rom_difference_deg"], "°"))
+    columns[3].metric("Symetria rąk", display_value(arms["symmetry_score"], "/100"))
+    st.caption(arms["note"])
 
 
 def reset_analysis_state():
@@ -554,7 +720,14 @@ def main():
         with col:
             st.markdown(html, unsafe_allow_html=True)
 
+    extended = report["extended_metrics"]
+    render_analysis_quality(extended)
+    render_cadence_section(report, extended)
     render_rom_validation(report["rom_validation"])
+    render_hip_section(extended["hips"])
+    render_trunk_section(extended["trunk"])
+    render_technique_section(extended["technique"])
+    render_arms_section(extended["arms"])
 
     st.markdown("### Obserwacje")
     for observation in report["observations"]:

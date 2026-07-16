@@ -13,6 +13,10 @@ ROM_REL_DROP_MIN_RAW_DEG = 30.0
 LANDMARKS_TO_SAVE = {
     "L_SHOULDER": 11,
     "R_SHOULDER": 12,
+    "L_ELBOW": 13,
+    "R_ELBOW": 14,
+    "L_WRIST": 15,
+    "R_WRIST": 16,
     "L_HIP": 23,
     "R_HIP": 24,
     "L_KNEE": 25,

@@ -191,6 +191,32 @@ def report_to_markdown(report):
             f"Wyeksportowane obrazy diagnostyczne: {validation.get('debug_frames_dir', 'brak')}",
         ])
 
+    extended = report.get("extended_metrics")
+    if extended:
+        cadence = extended["cadence"]
+        hips = extended["hips"]
+        trunk = extended["trunk"]
+        technique = extended["technique"]
+        arms = extended["arms"]
+        lines.extend([
+            "",
+            "## Dodatkowe wskaźniki 2D",
+            "",
+            f"- Regularność kroków: {cadence['regularity_label']} "
+            f"(CV: {cadence['regularity_cv_pct'] if cadence['regularity_cv_pct'] is not None else 'brak danych'}%)",
+            f"- ROM biodra L/P: {hips['left']['smoothed_rom_deg']}° / {hips['right']['smoothed_rom_deg']}°",
+            f"- Różnica ROM bioder: {hips['rom_difference_deg']}°",
+            f"- Zmienność pochylenia tułowia: {trunk['std_deg']}°",
+            f"- Stabilność sylwetki: {trunk['stability_pct']}%",
+            f"- Oscylacja pionowa bioder: {technique['vertical_hip_oscillation_pct_torso']}% długości tułowia",
+            f"- Overstriding (proxy 2D): "
+            f"{'możliwy' if technique['possible_overstriding'] else 'nie wykryto' if technique['overstriding_available'] else 'brak wiarygodnej oceny'}",
+            f"- ROM ramion L/P: {arms['left_arm_rom_deg']}° / {arms['right_arm_rom_deg']}°",
+            f"- Symetria pracy rąk: {arms['symmetry_score'] if arms['symmetry_score'] is not None else 'brak danych'}/100",
+            "",
+            "Wskaźniki kontaktu stopy i overstriding są estymacjami z obrazu 2D, nie pomiarem sił reakcji podłoża.",
+        ])
+
     lines.extend([
         "",
         "## Zalecenie",
