@@ -198,6 +198,7 @@ def report_to_markdown(report):
         trunk = extended["trunk"]
         technique = extended["technique"]
         arms = extended["arms"]
+        reliability = extended.get("reliability", {})
         lines.extend([
             "",
             "## Dodatkowe wskaźniki 2D",
@@ -216,6 +217,23 @@ def report_to_markdown(report):
             "",
             "Wskaźniki kontaktu stopy i overstriding są estymacjami z obrazu 2D, nie pomiarem sił reakcji podłoża.",
         ])
+        if reliability:
+            lines.extend([
+                "",
+                "## Wiarygodność wskaźników",
+                "",
+                *[
+                    f"- {label}: {reliability[key]['label']} - {reliability[key]['reason']}"
+                    for key, label in (
+                        ("cadence", "Kadencja"),
+                        ("knee_rom", "ROM kolan"),
+                        ("hip_rom", "ROM bioder"),
+                        ("trunk", "Pochylenie tułowia"),
+                        ("overstriding", "Overstriding proxy"),
+                        ("overall", "Cały raport"),
+                    )
+                ],
+            ])
 
     lines.extend([
         "",

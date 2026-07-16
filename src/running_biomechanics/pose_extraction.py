@@ -117,10 +117,11 @@ def format_debug_value(value, digits=1):
 
 def debug_side_state(landmarks, side, angle_deg, previous_angle_deg):
     indexes = {
-        "left": (25, 27),
-        "right": (26, 28),
+        "left": (23, 25, 27),
+        "right": (24, 26, 28),
     }
-    knee_idx, ankle_idx = indexes[side]
+    hip_idx, knee_idx, ankle_idx = indexes[side]
+    hip_visibility = landmarks[hip_idx].visibility if landmarks else np.nan
     knee_visibility = landmarks[knee_idx].visibility if landmarks else np.nan
     ankle_visibility = landmarks[ankle_idx].visibility if landmarks else np.nan
     angle_change = (
@@ -136,16 +137,33 @@ def debug_side_state(landmarks, side, angle_deg, previous_angle_deg):
         reasons.append("low knee visibility")
     if not np.isfinite(ankle_visibility) or ankle_visibility < ROM_VISIBILITY_THRESHOLD:
         reasons.append("low ankle visibility")
+    if not np.isfinite(hip_visibility) or hip_visibility < ROM_VISIBILITY_THRESHOLD:
+        reasons.append("low hip visibility")
+    outside_indexes = []
+    if landmarks:
+        outside_indexes = [
+            idx
+            for idx in (hip_idx, knee_idx, ankle_idx)
+            if landmarks[idx].x < 0
+            or landmarks[idx].x > 1
+            or landmarks[idx].y < 0
+            or landmarks[idx].y > 1
+        ]
+        if outside_indexes:
+            reasons.append("landmark outside image")
 
     return {
         "side": side,
         "angle_deg": angle_deg,
         "angle_change_deg": angle_change,
+        "hip_visibility": float(hip_visibility),
         "knee_visibility": float(knee_visibility),
         "ankle_visibility": float(ankle_visibility),
         "reasons": reasons,
+        "hip_idx": hip_idx,
         "knee_idx": knee_idx,
         "ankle_idx": ankle_idx,
+        "outside_indexes": outside_indexes,
     }
 
 
@@ -157,7 +175,7 @@ def save_debug_frame(frame, landmarks, frame_idx, side_states, output_path):
         for state in side_states:
             if not state["reasons"]:
                 continue
-            for idx in (state["knee_idx"], state["ankle_idx"]):
+            for idx in (state["hip_idx"], state["knee_idx"], state["ankle_idx"]):
                 x = int(landmarks[idx].x * w)
                 y = int(landmarks[idx].y * h)
                 cv2.circle(annotated, (x, y), 8, (0, 0, 255), 2)
@@ -172,7 +190,8 @@ def save_debug_frame(frame, landmarks, frame_idx, side_states, output_path):
             f"delta={format_debug_value(state['angle_change_deg'])} deg"
         )
         lines.append(
-            f"{side_label} knee_vis={format_debug_value(state['knee_visibility'], 2)} "
+            f"{side_label} hip_vis={format_debug_value(state['hip_visibility'], 2)} "
+            f"knee_vis={format_debug_value(state['knee_visibility'], 2)} "
             f"ankle_vis={format_debug_value(state['ankle_visibility'], 2)}; "
             f"{', '.join(state['reasons'])}"
         )

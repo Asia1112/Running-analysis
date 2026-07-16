@@ -67,6 +67,10 @@ class ExtendedAnalysisTests(unittest.TestCase):
         self.assertIsNotNone(details["arms"]["symmetry_score"])
         self.assertTrue(details["technique"]["direction_available"])
         self.assertGreater(details["technique"]["contact_count"], 3)
+        self.assertIn(details["quality"]["level"], {"good", "review", "unreliable"})
+        self.assertIn("overall", details["reliability"])
+        self.assertIsNotNone(details["trunk"]["min_deg"])
+        self.assertIsNotNone(details["trunk"]["max_deg"])
 
 
 if __name__ == "__main__":

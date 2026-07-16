@@ -15,3 +15,5 @@ pose_quality_checks/
 metrics_checks/
 app_runs/
 debug_frames/
+output/
+tmp/

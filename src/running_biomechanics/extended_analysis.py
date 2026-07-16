@@ -13,15 +13,101 @@ from .analysis import (
     read_rows,
     rom_value,
     safe_nanmean,
+    safe_nanmax,
+    safe_nanmin,
     safe_nanstd,
     trunk_lean_deg,
 )
-from .config import ANALYSIS_VISIBILITY_THRESHOLD, LANDMARKS_TO_SAVE
+from .config import ANALYSIS_VISIBILITY_THRESHOLD, LANDMARKS_TO_SAVE, ROM_VISIBILITY_THRESHOLD
 from .utils import moving_avg_nan, to_float
 
 
 ANGLE_STABLE_DELTA_DEG = 10.0
 MIN_METRIC_COVERAGE = 0.60
+
+
+RELIABILITY_LABELS = {
+    "good": "dobra",
+    "review": "wymaga weryfikacji",
+    "unreliable": "niewiarygodna",
+}
+
+
+def _reliability(level, reason):
+    return {
+        "level": level,
+        "label": RELIABILITY_LABELS[level],
+        "reason": reason,
+    }
+
+
+def _build_reliability(result, validation, details):
+    cadence_value = result.get("cadence", np.nan)
+    events = result.get("events", 0)
+    coverage = result.get("coverage", 0)
+    core_visible = result.get("core_visible_pct", 0)
+    if np.isfinite(cadence_value) and events >= 8 and coverage >= 0.80:
+        cadence = _reliability("good", "Wykryto wystarczającą liczbę zdarzeń przy dobrym pokryciu punktów.")
+    elif np.isfinite(cadence_value) and events >= 5 and coverage >= 0.65:
+        cadence = _reliability("review", "Liczba zdarzeń lub pokrycie punktów ogranicza pewność wyniku.")
+    else:
+        cadence = _reliability("unreliable", "Za mało stabilnych zdarzeń do wiarygodnego wyznaczenia rytmu.")
+
+    if core_visible < 70:
+        knee = _reliability("unreliable", "Widoczność głównych punktów kończyn dolnych jest zbyt niska.")
+    elif validation.get("tracking_error"):
+        knee = _reliability("review", "ROM wyraźnie zmienia się po wygładzeniu danych.")
+    else:
+        knee = _reliability("good", "ROM jest stabilny po wygładzeniu, a punkty są dostatecznie widoczne.")
+
+    hip_valid = min(
+        details["hips"]["left"].get("valid_pct") or 0,
+        details["hips"]["right"].get("valid_pct") or 0,
+    )
+    if not details["hips"]["available"]:
+        hip = _reliability("unreliable", "Za mało poprawnych klatek dla kąta biodra L/P.")
+    elif hip_valid >= 85:
+        hip = _reliability("good", "Kąty bioder są dostępne w większości klatek.")
+    else:
+        hip = _reliability("review", "Część klatek bioder została odrzucona przez próg visibility.")
+
+    trunk_valid = details["trunk"].get("valid_pct") or 0
+    if trunk_valid < 60:
+        trunk = _reliability("unreliable", "Barki lub biodra są zbyt często niewidoczne.")
+    elif trunk_valid < 85:
+        trunk = _reliability("review", "Pochylenie obliczono z ograniczonej liczby poprawnych klatek.")
+    else:
+        trunk = _reliability("good", "Tułów jest widoczny w większości analizowanych klatek.")
+
+    technique = details["technique"]
+    if technique["overstriding_available"]:
+        overstriding = _reliability(
+            "review",
+            "To wskaźnik pomocniczy z obrazu 2D; kontakt stopy nie jest mierzony platformą sił.",
+        )
+    else:
+        overstriding = _reliability(
+            "unreliable",
+            "Nie udało się pewnie wyznaczyć kierunku ruchu lub kontaktów stopy.",
+        )
+
+    overall_level = {
+        "usable": "good",
+        "needs_review": "review",
+        "low_confidence": "unreliable",
+    }.get(result.get("report_status"), "review")
+    overall = _reliability(
+        overall_level,
+        "Ocena łączy pokrycie punktów, liczbę zdarzeń i stabilność sygnałów kątowych.",
+    )
+    return {
+        "cadence": cadence,
+        "knee_rom": knee,
+        "hip_rom": hip,
+        "trunk": trunk,
+        "overstriding": overstriding,
+        "overall": overall,
+    }
 
 
 def _columns_available(rows, landmark_names):
@@ -141,7 +227,7 @@ def _cadence_regularity(t, left_knee, right_knee):
     }
 
 
-def _visibility_quality(rows):
+def _visibility_quality(rows, visibility_threshold=ROM_VISIBILITY_THRESHOLD):
     labels = {
         "L_SHOULDER": "Bark L", "R_SHOULDER": "Bark P",
         "L_ELBOW": "Łokieć L", "R_ELBOW": "Łokieć P",
@@ -160,7 +246,7 @@ def _visibility_quality(rows):
         points.append({
             "punkt": labels.get(name, name),
             "mean_visibility": optional_round(safe_nanmean(values), 3),
-            "visible_pct": optional_round(np.mean(values >= ANALYSIS_VISIBILITY_THRESHOLD) * 100, 1),
+            "visible_pct": optional_round(np.mean(values >= visibility_threshold) * 100, 1),
         })
     return points
 
@@ -183,6 +269,7 @@ def _technique(rows, t, xy, hip_center_x, hip_center_y):
     contacts = {}
     shin_values = {}
     overstride_values = []
+    overstride_by_side = {}
 
     valid_hip = np.isfinite(hip_center_x)
     direction = None
@@ -200,7 +287,18 @@ def _technique(rows, t, xy, hip_center_x, hip_center_y):
     torso_length = np.hypot(nanmean_pair(l_sh_x, r_sh_x) - hip_center_x, shoulder_y - hip_center_y)
     torso_scale = np.nanmedian(torso_length[np.isfinite(torso_length)]) if np.any(np.isfinite(torso_length)) else np.nan
     hip_s = moving_avg_nan(hip_center_y, SMOOTH_K)
-    hip_range = rom_value(hip_s)
+    valid_hip_y = np.isfinite(hip_s)
+    if np.sum(valid_hip_y) >= 10:
+        time_step = np.nanmedian(np.diff(t))
+        baseline_window = max(5, int(round(0.6 / time_step))) if time_step > 0 else 15
+        if baseline_window % 2 == 0:
+            baseline_window += 1
+        hip_residual = hip_s - moving_avg_nan(hip_s, baseline_window)
+        hip_range = float(
+            np.nanpercentile(hip_residual, 95) - np.nanpercentile(hip_residual, 5)
+        )
+    else:
+        hip_range = np.nan
     oscillation_pct = hip_range / torso_scale * 100 if np.isfinite(torso_scale) and torso_scale > 0 else np.nan
 
     for side in ("L", "R"):
@@ -222,7 +320,11 @@ def _technique(rows, t, xy, hip_center_x, hip_center_y):
                 out=np.full_like(offset, np.nan),
                 where=leg_length > 1e-9,
             )
-            overstride_values.extend(normalized[event_idx][np.isfinite(normalized[event_idx])])
+            valid_offsets = normalized[event_idx][np.isfinite(normalized[event_idx])]
+            overstride_values.extend(valid_offsets)
+            overstride_by_side[side] = (
+                float(np.nanmedian(valid_offsets)) if len(valid_offsets) else np.nan
+            )
 
     contact_count = int(len(contacts["L"]) + len(contacts["R"]))
     shin_left = safe_nanmean(shin_values["L"])
@@ -240,6 +342,8 @@ def _technique(rows, t, xy, hip_center_x, hip_center_y):
         "shin_angle_right_deg": optional_round(shin_right, 1) if contact_available else None,
         "overstriding_available": bool(overstride_available),
         "overstriding_offset_leg_ratio": optional_round(overstride_median, 3) if overstride_available else None,
+        "overstriding_left_ratio": optional_round(overstride_by_side.get("L"), 3) if overstride_available else None,
+        "overstriding_right_ratio": optional_round(overstride_by_side.get("R"), 3) if overstride_available else None,
         "possible_overstriding": bool(overstride_available and overstride_median > 0.15),
         "vertical_hip_oscillation_pct_torso": optional_round(oscillation_pct, 1),
         "note": (
@@ -293,6 +397,7 @@ def analyze_extended_metrics(csv_path, result, validation, visibility_threshold=
             "contact_available": False, "contact_count": 0, "direction_available": False,
             "shin_angle_left_deg": None, "shin_angle_right_deg": None,
             "overstriding_available": False, "overstriding_offset_leg_ratio": None,
+            "overstriding_left_ratio": None, "overstriding_right_ratio": None,
             "possible_overstriding": False, "vertical_hip_oscillation_pct_torso": None,
             "note": "Brak wystarczających punktów do oceny techniki.",
         }
@@ -311,27 +416,65 @@ def analyze_extended_metrics(csv_path, result, validation, visibility_threshold=
         if np.isfinite(left_swing_rom) and np.isfinite(right_swing_rom) else np.nan
     )
 
-    return {
+    landmark_quality = _visibility_quality(rows)
+    visible_values = [
+        item["visible_pct"] for item in landmark_quality if item["visible_pct"] is not None
+    ]
+    worst_landmarks = sorted(
+        landmark_quality,
+        key=lambda item: item["visible_pct"] if item["visible_pct"] is not None else -1,
+    )[:3]
+    suspicious_ratio = unique_suspicious / max(1, len(rows)) * 100
+    mean_visible_pct = float(np.mean(visible_values)) if visible_values else 0.0
+    if result.get("core_visible_pct", 0) >= 85 and mean_visible_pct >= 85 and suspicious_ratio <= 5:
+        quality_level = "good"
+    elif result.get("core_visible_pct", 0) >= 70 and mean_visible_pct >= 70:
+        quality_level = "review"
+    else:
+        quality_level = "unreliable"
+
+    hip_difference = optional_round(hip_rom_diff, 2)
+    if hip_difference is None:
+        hip_symmetry = "brak wiarygodnej oceny"
+    elif hip_difference <= 8:
+        hip_symmetry = "dobra"
+    elif hip_difference <= 15:
+        hip_symmetry = "wymaga weryfikacji"
+    else:
+        hip_symmetry = "wyraźna różnica - wymaga weryfikacji"
+
+    details = {
         "core_visible_pct": optional_round(result.get("core_visible_pct"), 1),
+        "frame_count": len(rows),
+        "duration_s": optional_round(t[-1] - t[0], 2) if len(t) else None,
         "quality": {
-            "landmarks": _visibility_quality(rows),
+            "landmarks": landmark_quality,
+            "worst_landmarks": worst_landmarks,
+            "mean_visible_pct": optional_round(mean_visible_pct, 1),
             "suspicious_frame_count": unique_suspicious,
+            "suspicious_frame_pct": optional_round(suspicious_ratio, 1),
             "angle_stability_pct": optional_round(np.mean(knee_stabilities), 1) if knee_stabilities else None,
             "angle_stability_left_pct": _stability(left_knee),
             "angle_stability_right_pct": _stability(right_knee),
+            "level": quality_level,
+            "label": RELIABILITY_LABELS[quality_level],
         },
         "cadence": cadence_details,
         "hips": {
             "available": bool(hip_available),
             "left": left_hip_summary,
             "right": right_hip_summary,
-            "rom_difference_deg": optional_round(hip_rom_diff, 2),
+            "rom_difference_deg": hip_difference,
+            "symmetry_label": hip_symmetry,
             "series": _chart_series(t, left_hip, right_hip, left_hip_s, right_hip_s),
         },
         "trunk": {
             "mean_deg": optional_round(safe_nanmean(trunk), 2),
+            "min_deg": optional_round(safe_nanmin(trunk), 2),
+            "max_deg": optional_round(safe_nanmax(trunk), 2),
             "std_deg": optional_round(safe_nanstd(trunk), 2),
             "stability_pct": _stability(trunk, threshold=3.0),
+            "valid_pct": optional_round(_valid_pct(trunk), 1),
         },
         "technique": technique,
         "arms": {
@@ -347,3 +490,5 @@ def analyze_extended_metrics(csv_path, result, validation, visibility_threshold=
         },
         "frames": frame.tolist(),
     }
+    details["reliability"] = _build_reliability(result, validation, details)
+    return details

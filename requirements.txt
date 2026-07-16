@@ -4,3 +4,4 @@ numpy
 matplotlib
 streamlit
 imageio-ffmpeg
+reportlab

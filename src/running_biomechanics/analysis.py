@@ -127,26 +127,43 @@ def validate_knee_rom(
     )
     time_s = np.array([to_float(row.get("t_ms")) / 1000.0 for row in rows], dtype=float)
     side_config = {
-        "left": ("Lewe", "left_knee_deg", "L_KNEE_vis", "L_ANKLE_vis"),
-        "right": ("Prawe", "right_knee_deg", "R_KNEE_vis", "R_ANKLE_vis"),
+        "left": ("Lewe", "left_knee_deg", "L_HIP", "L_KNEE", "L_ANKLE"),
+        "right": ("Prawe", "right_knee_deg", "R_HIP", "R_KNEE", "R_ANKLE"),
     }
 
     series = []
     suspicious = []
     sides = {}
 
-    for side, (label, angle_col, knee_vis_col, ankle_vis_col) in side_config.items():
+    for side, (label, angle_col, hip_name, knee_name, ankle_name) in side_config.items():
         raw = np.array([to_float(row.get(angle_col)) for row in rows], dtype=float)
         smoothed = moving_avg_nan(raw, smoothing_window)
-        knee_vis = np.array([to_float(row.get(knee_vis_col)) for row in rows], dtype=float)
-        ankle_vis = np.array([to_float(row.get(ankle_vis_col)) for row in rows], dtype=float)
+        knee_vis = np.array([to_float(row.get(f"{knee_name}_vis")) for row in rows], dtype=float)
+        ankle_vis = np.array([to_float(row.get(f"{ankle_name}_vis")) for row in rows], dtype=float)
+        hip_available = f"{hip_name}_vis" in rows[0]
+        hip_vis = np.array([to_float(row.get(f"{hip_name}_vis")) for row in rows], dtype=float)
 
         delta = np.full(len(raw), np.nan, dtype=float)
         delta[1:] = np.abs(np.diff(raw))
         jump_mask = np.isfinite(delta) & (delta > jump_threshold_deg)
         low_knee_mask = ~np.isfinite(knee_vis) | (knee_vis < visibility_threshold)
         low_ankle_mask = ~np.isfinite(ankle_vis) | (ankle_vis < visibility_threshold)
-        suspicious_mask = jump_mask | low_knee_mask | low_ankle_mask
+        low_hip_mask = (
+            (~np.isfinite(hip_vis) | (hip_vis < visibility_threshold))
+            if hip_available
+            else np.zeros(len(rows), dtype=bool)
+        )
+        outside_mask = np.zeros(len(rows), dtype=bool)
+        for landmark_name in (hip_name, knee_name, ankle_name):
+            if f"{landmark_name}_x" not in rows[0] or f"{landmark_name}_y" not in rows[0]:
+                continue
+            x = np.array([to_float(row.get(f"{landmark_name}_x")) for row in rows])
+            y = np.array([to_float(row.get(f"{landmark_name}_y")) for row in rows])
+            outside_mask |= (
+                (np.isfinite(x) & ((x < 0) | (x > 1)))
+                | (np.isfinite(y) & ((y < 0) | (y > 1)))
+            )
+        suspicious_mask = jump_mask | low_knee_mask | low_ankle_mask | low_hip_mask | outside_mask
 
         raw_rom = rom_value(raw)
         smoothed_rom = rom_value(smoothed)
@@ -174,7 +191,8 @@ def validate_knee_rom(
             "raw_extrema": series_extrema(raw, frame_numbers),
             "smoothed_extrema": series_extrema(smoothed, frame_numbers),
             "jump_count": int(np.sum(jump_mask)),
-            "low_visibility_count": int(np.sum(low_knee_mask | low_ankle_mask)),
+            "low_visibility_count": int(np.sum(low_knee_mask | low_ankle_mask | low_hip_mask)),
+            "outside_image_count": int(np.sum(outside_mask)),
         }
 
         for i in range(len(rows)):
@@ -186,6 +204,7 @@ def validate_knee_rom(
                 "angle_raw_deg": optional_round(raw[i], 3),
                 "angle_smoothed_deg": optional_round(smoothed[i], 3),
                 "angle_change_deg": optional_round(delta[i], 3),
+                "hip_visibility": optional_round(hip_vis[i], 3),
                 "knee_visibility": optional_round(knee_vis[i], 3),
                 "ankle_visibility": optional_round(ankle_vis[i], 3),
                 "is_jump": bool(jump_mask[i]),
@@ -200,8 +219,59 @@ def validate_knee_rom(
                     reasons.append(f"visibility kolana < {visibility_threshold:g}")
                 if low_ankle_mask[i]:
                     reasons.append(f"visibility kostki < {visibility_threshold:g}")
+                if low_hip_mask[i]:
+                    reasons.append(f"visibility biodra < {visibility_threshold:g}")
+                if outside_mask[i]:
+                    reasons.append("punkt poza obrazem")
 
-                suspicious.append({**point, "reasons": reasons})
+                visibility_values = {
+                    "biodro": hip_vis[i] if hip_available else np.nan,
+                    "kolano": knee_vis[i],
+                    "kostka": ankle_vis[i],
+                }
+                finite_visibility = {
+                    name: value
+                    for name, value in visibility_values.items()
+                    if np.isfinite(value) and value < visibility_threshold
+                }
+                if finite_visibility:
+                    problem_point = min(finite_visibility, key=finite_visibility.get)
+                elif jump_mask[i]:
+                    problem_point = "kąt kolana"
+                elif outside_mask[i]:
+                    problem_point = "punkt poza obrazem"
+                else:
+                    problem_point = "brak danych"
+                problem_visibility = finite_visibility.get(problem_point, np.nan)
+
+                suspicious.append({
+                    **point,
+                    "problem": problem_point,
+                    "problem_visibility": optional_round(problem_visibility, 3),
+                    "reasons": reasons,
+                })
+
+        if tracking_error:
+            raw_maximum = sides[side]["raw_extrema"]["max"]
+            extrema_frames = {raw_maximum["frame"]} if raw_maximum is not None else set()
+            for frame in extrema_frames:
+                index = int(np.flatnonzero(frame_numbers == frame)[0])
+                suspicious.append({
+                    "frame": int(frame),
+                    "time_s": optional_round(time_s[index], 3),
+                    "side": side,
+                    "side_label": label,
+                    "angle_raw_deg": optional_round(raw[index], 3),
+                    "angle_smoothed_deg": optional_round(smoothed[index], 3),
+                    "angle_change_deg": optional_round(delta[index], 3),
+                    "hip_visibility": optional_round(hip_vis[index], 3),
+                    "knee_visibility": optional_round(knee_vis[index], 3),
+                    "ankle_visibility": optional_round(ankle_vis[index], 3),
+                    "is_jump": bool(jump_mask[index]),
+                    "problem": "ROM",
+                    "problem_visibility": None,
+                    "reasons": ["ROM mocno zmienia się po wygładzeniu"],
+                })
 
     suspicious_frames = sorted({item["frame"] for item in suspicious})
     return {

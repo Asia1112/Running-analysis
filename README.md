@@ -77,6 +77,16 @@ Start the upload app:
 .\.venv\Scripts\streamlit.exe run app.py
 ```
 
+The Streamlit report is organized into tabs for preview, detection quality,
+cadence, knees, hips, trunk, technical proxy indicators, suspicious frames,
+and exports. Each major metric has a separate reliability assessment. The
+export tab provides PDF, landmark CSV, angle CSV, suspicious-frame CSV, and a
+ZIP archive of diagnostic frames when they are available.
+
+All reported values are technical indicators estimated from a side-view 2D
+recording. They are not a medical diagnosis and should be verified against the
+annotated video whenever landmark visibility or temporal stability is limited.
+
 Plot knee angles:
 
 ```powershell

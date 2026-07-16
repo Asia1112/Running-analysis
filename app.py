@@ -5,6 +5,13 @@ import streamlit as st
 
 from src.running_biomechanics.analysis import analyze_csv, validate_knee_rom
 from src.running_biomechanics.extended_analysis import analyze_extended_metrics
+from src.running_biomechanics.exports import (
+    build_angles_csv,
+    build_debug_frames_zip,
+    build_pdf_report,
+    build_suspicious_csv,
+    suspicious_rows,
+)
 from src.running_biomechanics.pose_extraction import process_video
 from src.running_biomechanics.report import build_report, report_to_markdown
 
@@ -14,9 +21,9 @@ APP_RUNS_DIR.mkdir(exist_ok=True)
 
 
 STATUS_META = {
-    "usable": ("Dobrze", "#65d44d"),
-    "needs_review": ("Weryfikacja", "#d5b82f"),
-    "low_confidence": ("Niska pewność", "#e45835"),
+    "usable": ("Dobry", "#65d44d"),
+    "needs_review": ("Wymaga weryfikacji", "#d5b82f"),
+    "low_confidence": ("Niewiarygodny", "#e45835"),
 }
 
 
@@ -221,7 +228,57 @@ def inject_styles():
         .stDownloadButton > button {
             border-radius: 8px;
             border-color: rgba(255, 122, 47, 0.65);
-            color: var(--text);
+            background: #f7f7f4;
+            color: #171a1c !important;
+            font-weight: 700;
+        }
+
+        .stDownloadButton > button p,
+        .stDownloadButton > button span,
+        .stDownloadButton > button [data-testid="stIconMaterial"] {
+            color: #171a1c !important;
+            fill: #171a1c !important;
+        }
+
+        .stDownloadButton > button:hover {
+            background: #ff7a2f;
+            border-color: #ff7a2f;
+            color: #111 !important;
+        }
+
+        [data-testid="stMetric"] {
+            background: #111416;
+            border-color: rgba(255, 255, 255, 0.12) !important;
+            min-height: 8.5rem;
+        }
+
+        [data-testid="stMetricLabel"] p,
+        [data-testid="stMetricLabel"] span {
+            color: #c9cdd1 !important;
+            opacity: 1 !important;
+        }
+
+        [data-testid="stMetricValue"],
+        [data-testid="stMetricValue"] div,
+        [data-testid="stMetricValue"] span {
+            color: #ffffff !important;
+            opacity: 1 !important;
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            word-break: normal !important;
+            overflow-wrap: anywhere !important;
+        }
+
+        [data-testid="stMetricValue"] > div {
+            font-size: clamp(1.45rem, 2.1vw, 2rem) !important;
+            line-height: 1.15 !important;
+            max-width: 100% !important;
+        }
+
+        [data-testid="stMetricDelta"] div,
+        [data-testid="stMetricDelta"] span {
+            opacity: 1 !important;
         }
         </style>
         """,
@@ -338,8 +395,15 @@ def run_analysis(video_path, crop_mode):
         report["recommendation"] = (
             "Zweryfikuj oznaczone klatki przed interpretacją zakresu ruchu kolan."
         )
+        report["extended_metrics"]["reliability"]["overall"] = {
+            "level": "review",
+            "label": "wymaga weryfikacji",
+            "reason": "Walidacja wykazała podejrzany spadek ROM po wygładzeniu.",
+        }
     report["rom_validation"] = validation
     report["annotated_video_path"] = processing_stats["annotated_video_path"]
+    report["csv_path"] = str(csv_path)
+    report["processing_stats"] = processing_stats
     return report
 
 
@@ -354,8 +418,11 @@ def extrema_caption(extrema):
     )
 
 
-def render_rom_validation(validation):
-    st.markdown("### 3. Kolana")
+def render_rom_validation(validation, reliability=None):
+    st.subheader("Kolana")
+
+    if reliability:
+        render_reliability(reliability, "Wiarygodność ROM kolan")
 
     if validation["tracking_error"]:
         st.error(
@@ -445,47 +512,20 @@ def render_rom_validation(validation):
                 if side["tracking_error"]:
                     st.warning("Prawdopodobny błąd śledzenia dla tej strony.")
 
-    suspicious = validation["suspicious_frames"]
-    st.markdown("#### Podejrzane klatki")
-    if suspicious:
-        table_rows = [
-            {
-                "Klatka": item["frame"],
-                "Czas [s]": item["time_s"],
-                "Strona": item["side_label"],
-                "Kąt [°]": item["angle_raw_deg"],
-                "Zmiana [°]": item["angle_change_deg"],
-                "Visibility kolana": item["knee_visibility"],
-                "Visibility kostki": item["ankle_visibility"],
-                "Powód": "; ".join(item["reasons"]),
-            }
-            for item in suspicious
-        ]
-        st.dataframe(
-            table_rows,
-            column_config={
-                "Klatka": st.column_config.NumberColumn(format="%d"),
-                "Czas [s]": st.column_config.NumberColumn(format="%.3f"),
-                "Kąt [°]": st.column_config.NumberColumn(format="%.1f"),
-                "Zmiana [°]": st.column_config.NumberColumn(format="%.1f"),
-                "Visibility kolana": st.column_config.NumberColumn(format="%.2f"),
-                "Visibility kostki": st.column_config.NumberColumn(format="%.2f"),
-            },
-            hide_index=True,
-        )
-    else:
-        st.success("Nie wykryto podejrzanych klatek.")
-
-    st.caption(
-        f"Wyeksportowano {validation['debug_frames_count']} oznaczonych klatek do: "
-        f"{validation['debug_frames_dir']}"
-    )
-
-
 def display_value(value, suffix="", digits=1):
     if value is None:
         return "Brak danych"
     return f"{value:.{digits}f}{suffix}"
+
+
+def render_reliability(reliability, title="Wiarygodność"):
+    message = f"{title}: {reliability['label']}. {reliability['reason']}"
+    if reliability["level"] == "good":
+        st.success(message, icon=":material/check_circle:")
+    elif reliability["level"] == "review":
+        st.warning(message, icon=":material/warning:")
+    else:
+        st.error(message, icon=":material/error:")
 
 
 def render_angle_chart(series, y_title):
@@ -518,26 +558,37 @@ def render_angle_chart(series, y_title):
 
 
 def render_analysis_quality(details):
-    st.markdown("### 1. Jakość analizy")
+    st.subheader("Jakość detekcji")
     quality = details["quality"]
-    columns = st.columns(3)
-    columns[0].metric("Widoczność głównych punktów", f"{details['core_visible_pct']:.1f}%")
-    columns[1].metric("Podejrzane klatki", quality["suspicious_frame_count"])
-    columns[2].metric(
+    columns = st.columns(4)
+    columns[0].metric("Widoczność głównych punktów", f"{details['core_visible_pct']:.1f}%", border=True)
+    columns[1].metric("Średnia jakość punktów", f"{quality['mean_visible_pct']:.1f}%", border=True)
+    columns[2].metric("Podejrzane klatki", quality["suspicious_frame_count"], border=True)
+    columns[3].metric(
         "Stabilność kątów kolan",
         display_value(quality["angle_stability_pct"], "%"),
+        border=True,
     )
+    if quality["level"] == "good":
+        st.success(f"Ocena jakości detekcji: {quality['label']}.", icon=":material/check_circle:")
+    elif quality["level"] == "review":
+        st.warning(f"Ocena jakości detekcji: {quality['label']}.", icon=":material/warning:")
+    else:
+        st.error(f"Ocena jakości detekcji: {quality['label']}.", icon=":material/error:")
     st.caption(
         "Stabilność oznacza odsetek kolejnych klatek, w których zmiana kąta nie przekracza 10°."
     )
-    with st.expander("Widoczność poszczególnych punktów"):
+    st.markdown("**Najgorsze punkty:** " + ", ".join(
+        f"{item['punkt']} ({item['visible_pct']}%)" for item in quality["worst_landmarks"]
+    ))
+    with st.expander("Tabela jakości wszystkich punktów", expanded=True):
         st.dataframe(
             quality["landmarks"],
             column_config={
                 "punkt": "Punkt",
                 "mean_visibility": st.column_config.NumberColumn("Średnia visibility", format="%.2f"),
                 "visible_pct": st.column_config.ProgressColumn(
-                    "Klatki z visibility ≥ 0.65", min_value=0, max_value=100, format="%.1f%%"
+                    "Klatki z visibility > 0.6", min_value=0, max_value=100, format="%.1f%%"
                 ),
             },
             hide_index=True,
@@ -545,26 +596,32 @@ def render_analysis_quality(details):
 
 
 def render_cadence_section(report, extended):
-    st.markdown("### 2. Kadencja i rytm")
+    st.subheader("Kadencja i rytm")
     metrics = report["metrics"]
     cadence = extended["cadence"]
     columns = st.columns(4)
-    columns[0].metric("Kadencja ogólna", f"{metrics['cadence_spm']:.1f} kroków/min")
-    columns[1].metric("Kadencja L", f"{metrics['cadence_left_spm']:.1f} kroków/min")
-    columns[2].metric("Kadencja P", f"{metrics['cadence_right_spm']:.1f} kroków/min")
-    columns[3].metric(
+    columns[0].metric("Kadencja ogólna [kroków/min]", f"{metrics['cadence_spm']:.1f}", border=True)
+    columns[1].metric("Kadencja L/P [kroków/min]", f"{metrics['cadence_left_spm']:.1f} / {metrics['cadence_right_spm']:.1f}", border=True)
+    columns[2].metric("Różnica L/P [kroków/min]", f"{metrics['lr_cadence_difference_spm']:.1f}", border=True)
+    columns[3].metric("Wykryte zdarzenia", report["analysis_window"]["events"], border=True)
+    st.metric(
         "Regularność kroków",
-        cadence["regularity_label"].capitalize(),
+        "Brak danych" if cadence["regularity_label"] == "niewystarczające dane" else cadence["regularity_label"].capitalize(),
         display_value(cadence["regularity_cv_pct"], "% CV"),
+        border=True,
     )
+    st.caption(report["observations"][0])
+    render_reliability(extended["reliability"]["cadence"], "Wiarygodność kadencji")
     st.caption(
         "Niższy współczynnik zmienności (CV) odstępów między krokami oznacza bardziej regularny rytm. "
         "Wynik wymaga co najmniej trzech wykrytych zdarzeń na stronę."
     )
 
 
-def render_hip_section(hips):
-    st.markdown("### 4. Biodra")
+def render_hip_section(hips, reliability=None):
+    st.subheader("Biodra")
+    if reliability:
+        render_reliability(reliability, "Wiarygodność ROM bioder")
     if not hips["available"]:
         st.warning("Widoczność barków, bioder lub kolan jest zbyt niska dla wiarygodnego ROM bioder.")
         return
@@ -573,29 +630,52 @@ def render_hip_section(hips):
     columns[0].metric("ROM biodra L", display_value(hips["left"]["smoothed_rom_deg"], "°"))
     columns[1].metric("ROM biodra P", display_value(hips["right"]["smoothed_rom_deg"], "°"))
     columns[2].metric("Różnica L/P", display_value(hips["rom_difference_deg"], "°"))
+    if hips["symmetry_label"] == "dobra":
+        symmetry_value = "Dobra"
+    elif "wyraźna różnica" in hips["symmetry_label"]:
+        symmetry_value = "Wyraźna różnica"
+    elif "weryfikacji" in hips["symmetry_label"]:
+        symmetry_value = "Weryfikacja"
+    else:
+        symmetry_value = "Brak danych"
+    st.metric("Ocena symetrii bioder", symmetry_value, border=True)
+    st.caption(f"Pełna ocena symetrii: {hips['symmetry_label']}.")
     st.caption("Kąt biodra jest liczony w 2D z punktów bark–biodro–kolano; pokazany ROM używa danych wygładzonych.")
 
 
-def render_trunk_section(trunk):
-    st.markdown("### 5. Tułów")
-    columns = st.columns(3)
+def render_trunk_section(trunk, reliability=None):
+    st.subheader("Tułów")
+    if reliability:
+        render_reliability(reliability, "Wiarygodność pochylenia tułowia")
+    columns = st.columns(4)
     columns[0].metric("Średnie pochylenie", display_value(trunk["mean_deg"], "°"))
-    columns[1].metric("Zmienność pochylenia", display_value(trunk["std_deg"], "° SD"))
-    columns[2].metric("Stabilność sylwetki", display_value(trunk["stability_pct"], "%"))
+    columns[1].metric("Zakres min/max", f"{display_value(trunk['min_deg'], '°')} / {display_value(trunk['max_deg'], '°')}")
+    columns[2].metric("Zmienność pochylenia", display_value(trunk["std_deg"], "° SD"))
+    columns[3].metric("Stabilność sylwetki", display_value(trunk["stability_pct"], "%"))
+    if trunk["stability_pct"] is not None and trunk["stability_pct"] >= 90:
+        st.success("Tułów wygląda stabilnie w większości kolejnych klatek.")
+    else:
+        st.warning("Zmienność tułowia może wskazywać na niestabilność albo błąd punktów i wymaga weryfikacji.")
     st.caption("Stabilność oznacza odsetek zmian między klatkami nieprzekraczających 3°.")
 
 
-def render_technique_section(technique):
-    st.markdown("### 6. Wskaźniki techniki")
+def render_technique_section(technique, reliability=None):
+    st.subheader("Wskaźniki techniczne")
+    if reliability:
+        render_reliability(reliability, "Wiarygodność overstriding proxy")
     columns = st.columns(3)
     if technique["overstriding_available"]:
         columns[0].metric(
             "Możliwy overstriding",
             "Tak" if technique["possible_overstriding"] else "Nie wykryto",
-            display_value(technique["overstriding_offset_leg_ratio"], " długości podudzia", 2),
+            display_value(technique["overstriding_offset_leg_ratio"], "", 2),
+        )
+        columns[0].caption(
+            f"Pozycja stopy L/P: {display_value(technique['overstriding_left_ratio'], '', 2)} / "
+            f"{display_value(technique['overstriding_right_ratio'], '', 2)} długości podudzia"
         )
     else:
-        columns[0].metric("Możliwy overstriding", "Brak wiarygodnej oceny")
+        columns[0].metric("Możliwy overstriding", "Brak danych")
     if technique["contact_available"]:
         columns[1].metric(
             "Kąt piszczeli przy kontakcie L/P",
@@ -603,10 +683,10 @@ def render_technique_section(technique):
             f"{display_value(technique['shin_angle_right_deg'], '°')}",
         )
     else:
-        columns[1].metric("Kąt piszczeli przy kontakcie", "Brak wiarygodnej oceny")
+        columns[1].metric("Kąt piszczeli przy kontakcie", "Brak danych")
     columns[2].metric(
-        "Oscylacja pionowa bioder",
-        display_value(technique["vertical_hip_oscillation_pct_torso"], "% długości tułowia"),
+        "Oscylacja bioder [% długości tułowia]",
+        display_value(technique["vertical_hip_oscillation_pct_torso"], "%"),
     )
     st.info(technique["note"])
     if not technique["direction_available"]:
@@ -630,13 +710,191 @@ def render_arms_section(arms):
     st.caption(arms["note"])
 
 
+def render_preview_tab(report):
+    st.subheader("Podgląd analizy")
+    annotated_path = report.get("annotated_video_path")
+    if annotated_path and Path(annotated_path).exists():
+        st.video(annotated_path)
+        st.caption("Nagranie z punktami MediaPipe, szkieletem i kątami kolan.")
+    else:
+        st.warning("Nie znaleziono wygenerowanego filmu ze szkieletem.")
+
+    extended = report["extended_metrics"]
+    window = report["analysis_window"]
+    status_label = {
+        "usable": "Dobry",
+        "needs_review": "Weryfikacja",
+        "low_confidence": "Niewiarygodny",
+    }.get(report["status"], "Weryfikacja")
+    columns = st.columns(4)
+    columns[0].metric("Przeanalizowane klatki", extended["frame_count"], border=True)
+    columns[1].metric("Długość nagrania", display_value(extended["duration_s"], " s"), border=True)
+    columns[2].metric("Zakres analizy", f"{window['start_s']}–{window['end_s']} s", border=True)
+    columns[3].metric("Status raportu", status_label, border=True)
+    render_reliability(extended["reliability"]["overall"], "Wiarygodność całego raportu")
+    with st.expander("Obserwacje i zalecenie", expanded=True, icon=":material/description:"):
+        for observation in report["observations"]:
+            st.markdown(f"- {observation}")
+        st.markdown(f"**Zalecenie:** {report['recommendation']}")
+    st.caption(
+        "Wyniki są orientacyjnymi wskaźnikami technicznymi z obrazu 2D i nie stanowią diagnozy medycznej."
+    )
+
+
+def render_suspicious_frames(report):
+    st.subheader("Podejrzane klatki")
+    rows = suspicious_rows(report)
+    if not rows:
+        st.success("Nie wykryto podejrzanych klatek.", icon=":material/check_circle:")
+    else:
+        st.warning(
+            f"Znaleziono {len(report['rom_validation']['suspicious_frame_numbers'])} unikalnych podejrzanych klatek "
+            f"({len(rows)} wpisów L/P).",
+            icon=":material/warning:",
+        )
+        st.dataframe(
+            rows,
+            column_config={
+                "frame": st.column_config.NumberColumn("Klatka", format="%d", pinned=True),
+                "time_s": st.column_config.NumberColumn("Czas [s]", format="%.3f"),
+                "side": "Strona",
+                "problem": "Problematyczny punkt",
+                "problem_visibility": st.column_config.NumberColumn("Visibility punktu", format="%.2f"),
+                "hip_visibility": st.column_config.NumberColumn("Visibility biodra", format="%.2f"),
+                "knee_visibility": st.column_config.NumberColumn("Visibility kolana", format="%.2f"),
+                "ankle_visibility": st.column_config.NumberColumn("Visibility kostki", format="%.2f"),
+                "angle_deg": st.column_config.NumberColumn("Kąt [°]", format="%.1f"),
+                "angle_change_deg": st.column_config.NumberColumn("Zmiana [°]", format="%.1f"),
+                "reason": "Powód oznaczenia",
+            },
+            hide_index=True,
+        )
+
+    debug_dir = report["rom_validation"].get("debug_frames_dir")
+    images = []
+    if debug_dir and Path(debug_dir).exists():
+        images = sorted(
+            path for path in Path(debug_dir).iterdir()
+            if path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        )
+    st.caption(f"Zapisane obrazy debug: {len(images)} · folder: {debug_dir or 'brak'}")
+    if images:
+        with st.expander("Podgląd zapisanych klatek", icon=":material/image:"):
+            for start in range(0, min(len(images), 12), 3):
+                columns = st.columns(3)
+                for column, image_path in zip(columns, images[start:start + 3]):
+                    column.image(str(image_path), caption=image_path.stem)
+            if len(images) > 12:
+                st.caption("Pokazano pierwsze 12 obrazów. Pełny zestaw można pobrać jako ZIP.")
+
+
+def render_export_tab(report):
+    st.subheader("Eksport wyników")
+    st.caption("Pliki są generowane dla aktualnie przeanalizowanego nagrania.")
+    csv_path = Path(report["csv_path"])
+    pdf_bytes = build_pdf_report(report)
+    angles_csv = build_angles_csv(report)
+    suspicious_csv = build_suspicious_csv(report)
+    debug_zip = build_debug_frames_zip(report["rom_validation"].get("debug_frames_dir"))
+
+    with st.container(horizontal=True):
+        st.download_button(
+            "Raport PDF",
+            data=pdf_bytes,
+            file_name="raport_biegu.pdf",
+            mime="application/pdf",
+            icon=":material/picture_as_pdf:",
+        )
+        st.download_button(
+            "Punkty MediaPipe CSV",
+            data=csv_path.read_bytes(),
+            file_name="punkty_mediapipe.csv",
+            mime="text/csv",
+            icon=":material/table_view:",
+        )
+        st.download_button(
+            "Kąty CSV",
+            data=angles_csv,
+            file_name="katy_biegu.csv",
+            mime="text/csv",
+            icon=":material/query_stats:",
+        )
+        st.download_button(
+            "Podejrzane klatki CSV",
+            data=suspicious_csv,
+            file_name="podejrzane_klatki.csv",
+            mime="text/csv",
+            icon=":material/warning:",
+        )
+        if debug_zip:
+            st.download_button(
+                "Klatki debug ZIP",
+                data=debug_zip,
+                file_name="debug_frames.zip",
+                mime="application/zip",
+                icon=":material/folder_zip:",
+            )
+    st.download_button(
+        "Raport tekstowy Markdown",
+        data=report_to_markdown(report),
+        file_name="raport_biegu.md",
+        mime="text/markdown",
+        icon=":material/description:",
+    )
+
+
+def render_report_tabs(report):
+    extended = report["extended_metrics"]
+    tabs = st.tabs([
+        "Podgląd",
+        "Jakość detekcji",
+        "Kadencja i rytm",
+        "Kolana",
+        "Biodra",
+        "Tułów",
+        "Wskaźniki techniczne",
+        "Podejrzane klatki",
+        "Eksport",
+    ], key="report_tabs", on_change="rerun")
+    if tabs[0].open:
+        with tabs[0]:
+            render_preview_tab(report)
+    if tabs[1].open:
+        with tabs[1]:
+            render_analysis_quality(extended)
+    if tabs[2].open:
+        with tabs[2]:
+            render_cadence_section(report, extended)
+    if tabs[3].open:
+        with tabs[3]:
+            render_rom_validation(report["rom_validation"], extended["reliability"]["knee_rom"])
+    if tabs[4].open:
+        with tabs[4]:
+            render_hip_section(extended["hips"], extended["reliability"]["hip_rom"])
+    if tabs[5].open:
+        with tabs[5]:
+            render_trunk_section(extended["trunk"], extended["reliability"]["trunk"])
+    if tabs[6].open:
+        with tabs[6]:
+            render_technique_section(extended["technique"], extended["reliability"]["overstriding"])
+            with st.expander("Dodatkowo: praca ramion", icon=":material/accessibility_new:"):
+                render_arms_section(extended["arms"])
+    if tabs[7].open:
+        with tabs[7]:
+            render_suspicious_frames(report)
+    if tabs[8].open:
+        with tabs[8]:
+            render_export_tab(report)
+
+
 def reset_analysis_state():
     st.session_state.pop("report", None)
     st.session_state.pop("markdown_report", None)
+    st.session_state.pop("report_tabs", None)
 
 
 def main():
-    st.set_page_config(page_title="Analiza biegu", page_icon="RUN", layout="wide")
+    st.set_page_config(page_title="Analiza biegu", page_icon=":material/directions_run:", layout="wide")
     inject_styles()
 
     st.markdown("<h2>Analiza</h2>", unsafe_allow_html=True)
@@ -678,29 +936,21 @@ def main():
 
     video_path = save_uploaded_video(uploaded_file)
     report = st.session_state.get("report")
-    annotated_video_path = report.get("annotated_video_path") if report else None
-    video_placeholder = st.empty()
-    video_caption = st.empty()
-    if annotated_video_path and Path(annotated_video_path).exists():
-        video_placeholder.video(annotated_video_path)
-        video_caption.caption("Nagranie z wykrytym szkieletem i kątami kolan.")
-    else:
-        video_placeholder.video(str(video_path))
-        video_caption.caption("Po analizie nagranie zostanie zastąpione wersją ze szkieletem.")
+    if not report:
+        st.video(str(video_path))
+        st.caption("Podgląd oryginalnego nagrania. Po analizie w zakładce Podgląd pojawi się film ze szkieletem.")
 
     if analyze:
         with st.spinner("Analizowanie nagrania..."):
             report = run_analysis(video_path, crop_mode)
             st.session_state["report"] = report
             st.session_state["markdown_report"] = report_to_markdown(report)
-            video_placeholder.video(report["annotated_video_path"])
-            video_caption.caption("Nagranie z wykrytym szkieletem i kątami kolan.")
 
     report = st.session_state.get("report")
     if not report:
         return
 
-    status_label, status_color = STATUS_META.get(report["status"], ("Weryfikacja", "#d5b82f"))
+    status_label, status_color = STATUS_META.get(report["status"], ("Wymaga weryfikacji", "#d5b82f"))
     st.markdown(
         f"""
         <div class="status-strip">
@@ -719,30 +969,8 @@ def main():
     for col, html in zip(cols, cards):
         with col:
             st.markdown(html, unsafe_allow_html=True)
-
-    extended = report["extended_metrics"]
-    render_analysis_quality(extended)
-    render_cadence_section(report, extended)
-    render_rom_validation(report["rom_validation"])
-    render_hip_section(extended["hips"])
-    render_trunk_section(extended["trunk"])
-    render_technique_section(extended["technique"])
-    render_arms_section(extended["arms"])
-
-    st.markdown("### Obserwacje")
-    for observation in report["observations"]:
-        st.markdown(f'<div class="observation-card">{observation}</div>', unsafe_allow_html=True)
-
-    st.markdown("### Zalecenie")
-    st.markdown(f'<div class="observation-card">{report["recommendation"]}</div>', unsafe_allow_html=True)
-
-    markdown_report = st.session_state["markdown_report"]
-    st.download_button(
-        "Pobierz raport",
-        data=markdown_report,
-        file_name="raport_biegu.md",
-        mime="text/markdown",
-    )
+    st.caption("Skrót wyników. Szczegóły, wiarygodność i eksport znajdują się w zakładkach poniżej.")
+    render_report_tabs(report)
 
 
 if __name__ == "__main__":
