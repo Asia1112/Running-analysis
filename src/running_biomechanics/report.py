@@ -158,6 +158,39 @@ def report_to_markdown(report):
     ]
 
     lines.extend(f"- {observation}" for observation in report["observations"])
+
+    validation = report.get("rom_validation")
+    if validation:
+        lines.extend([
+            "",
+            "## Walidacja ROM kolan",
+            "",
+        ])
+        for side_key in ("left", "right"):
+            side = validation["sides"][side_key]
+            raw_min = side["raw_extrema"]["min"]
+            raw_max = side["raw_extrema"]["max"]
+            lines.extend([
+                f"### {side['label']} kolano",
+                "",
+                f"- ROM surowy: {side['raw_rom_deg']}°",
+                f"- ROM po wygładzeniu: {side['smoothed_rom_deg']}°",
+                f"- Spadek ROM: {side['rom_drop_deg']}° ({side['rom_drop_pct']}%)",
+                f"- Skoki kąta > {validation['jump_threshold_deg']:g}°: {side['jump_count']}",
+                f"- Klatka minimum: {raw_min['frame'] if raw_min else 'brak'}",
+                f"- Klatka maksimum: {raw_max['frame'] if raw_max else 'brak'}",
+                f"- Prawdopodobny błąd śledzenia: {'tak' if side['tracking_error'] else 'nie'}",
+                "",
+            ])
+
+        frame_numbers = validation["suspicious_frame_numbers"]
+        frames_text = ", ".join(str(frame) for frame in frame_numbers) if frame_numbers else "brak"
+        lines.extend([
+            f"Podejrzane klatki: {frames_text}",
+            "",
+            f"Wyeksportowane obrazy diagnostyczne: {validation.get('debug_frames_dir', 'brak')}",
+        ])
+
     lines.extend([
         "",
         "## Zalecenie",

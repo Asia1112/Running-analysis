@@ -2,8 +2,11 @@ import argparse
 import csv
 import os
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 import cv2
+import imageio_ffmpeg
 import mediapipe as mp
 import numpy as np
 
@@ -17,6 +20,8 @@ from .config import (
     LANDMARKS_TO_SAVE,
     MODEL_PATH,
     POSE_CONNECTIONS,
+    ROM_JUMP_THRESHOLD_DEG,
+    ROM_VISIBILITY_THRESHOLD,
     VISIBILITY_THRESHOLD,
 )
 
@@ -104,6 +109,122 @@ def write_empty_landmarks(row):
         row += [np.nan, np.nan, np.nan, np.nan]
 
 
+def format_debug_value(value, digits=1):
+    if value is None or not np.isfinite(value):
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
+def debug_side_state(landmarks, side, angle_deg, previous_angle_deg):
+    indexes = {
+        "left": (25, 27),
+        "right": (26, 28),
+    }
+    knee_idx, ankle_idx = indexes[side]
+    knee_visibility = landmarks[knee_idx].visibility if landmarks else np.nan
+    ankle_visibility = landmarks[ankle_idx].visibility if landmarks else np.nan
+    angle_change = (
+        abs(angle_deg - previous_angle_deg)
+        if np.isfinite(angle_deg) and np.isfinite(previous_angle_deg)
+        else np.nan
+    )
+
+    reasons = []
+    if np.isfinite(angle_change) and angle_change > ROM_JUMP_THRESHOLD_DEG:
+        reasons.append("angle jump")
+    if not np.isfinite(knee_visibility) or knee_visibility < ROM_VISIBILITY_THRESHOLD:
+        reasons.append("low knee visibility")
+    if not np.isfinite(ankle_visibility) or ankle_visibility < ROM_VISIBILITY_THRESHOLD:
+        reasons.append("low ankle visibility")
+
+    return {
+        "side": side,
+        "angle_deg": angle_deg,
+        "angle_change_deg": angle_change,
+        "knee_visibility": float(knee_visibility),
+        "ankle_visibility": float(ankle_visibility),
+        "reasons": reasons,
+        "knee_idx": knee_idx,
+        "ankle_idx": ankle_idx,
+    }
+
+
+def save_debug_frame(frame, landmarks, frame_idx, side_states, output_path):
+    annotated = frame.copy()
+    if landmarks:
+        draw_landmarks(annotated, landmarks)
+        h, w = annotated.shape[:2]
+        for state in side_states:
+            if not state["reasons"]:
+                continue
+            for idx in (state["knee_idx"], state["ankle_idx"]):
+                x = int(landmarks[idx].x * w)
+                y = int(landmarks[idx].y * h)
+                cv2.circle(annotated, (x, y), 8, (0, 0, 255), 2)
+
+    lines = [f"Frame {frame_idx}"]
+    for state in side_states:
+        if not state["reasons"]:
+            continue
+        side_label = "L" if state["side"] == "left" else "R"
+        lines.append(
+            f"{side_label} angle={format_debug_value(state['angle_deg'])} deg "
+            f"delta={format_debug_value(state['angle_change_deg'])} deg"
+        )
+        lines.append(
+            f"{side_label} knee_vis={format_debug_value(state['knee_visibility'], 2)} "
+            f"ankle_vis={format_debug_value(state['ankle_visibility'], 2)}; "
+            f"{', '.join(state['reasons'])}"
+        )
+
+    overlay_height = 18 + 25 * len(lines)
+    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], overlay_height), (0, 0, 0), -1)
+    for line_idx, line in enumerate(lines):
+        cv2.putText(
+            annotated,
+            line,
+            (12, 25 + line_idx * 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    if not cv2.imwrite(str(output_path), annotated):
+        raise RuntimeError(f"Could not save debug frame: {output_path}")
+
+
+def annotate_video_frame(frame, landmarks, frame_idx, side_states):
+    annotated = frame.copy()
+    if landmarks:
+        draw_landmarks(annotated, landmarks)
+
+    left = next(state for state in side_states if state["side"] == "left")
+    right = next(state for state in side_states if state["side"] == "right")
+    lines = [
+        f"Frame {frame_idx}",
+        f"L knee={format_debug_value(left['angle_deg'])} deg  "
+        f"R knee={format_debug_value(right['angle_deg'])} deg",
+    ]
+
+    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 68), (0, 0, 0), -1)
+    for line_idx, line in enumerate(lines):
+        cv2.putText(
+            annotated,
+            line,
+            (12, 27 + line_idx * 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    height, width = annotated.shape[:2]
+    return annotated[: height - height % 2, : width - width % 2]
+
+
 def process_video(
     source,
     model_path=MODEL_PATH,
@@ -112,6 +233,8 @@ def process_video(
     resize_height=720,
     min_vis=VISIBILITY_THRESHOLD,
     preview=True,
+    debug_frames_dir="debug_frames",
+    annotated_video_path=None,
 ):
     if not os.path.exists(model_path):
         raise FileNotFoundError(
@@ -135,6 +258,17 @@ def process_video(
     if fps <= 1e-3:
         fps = 30.0
 
+    debug_run_dir = None
+    if debug_frames_dir:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        debug_run_dir = Path(debug_frames_dir) / f"{Path(source).stem}_{timestamp}"
+        debug_run_dir.mkdir(parents=True, exist_ok=True)
+
+    annotated_path = Path(annotated_video_path) if annotated_video_path else None
+    if annotated_path is not None:
+        annotated_path.parent.mkdir(parents=True, exist_ok=True)
+    annotated_writer = None
+
     with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
         writer = csv.writer(csv_file)
         header = ["frame_idx", "t_ms", "fps", "pose_found", "core_quality", "core_visible"]
@@ -148,6 +282,8 @@ def process_video(
         frame_idx = 0
         found_frames = 0
         good_core_frames = 0
+        debug_frames_count = 0
+        previous_angles = {"left": np.nan, "right": np.nan}
 
         while True:
             ok, frame = cap.read()
@@ -216,6 +352,53 @@ def process_video(
             row += [left_knee_deg, right_knee_deg]
             writer.writerow(row)
 
+            side_states = [
+                debug_side_state(landmarks, "left", left_knee_deg, previous_angles["left"]),
+                debug_side_state(landmarks, "right", right_knee_deg, previous_angles["right"]),
+            ]
+            suspicious_sides = [state for state in side_states if state["reasons"]]
+            if debug_run_dir is not None and suspicious_sides:
+                side_suffix = "".join(
+                    "L" if state["side"] == "left" else "R" for state in suspicious_sides
+                )
+                output_path = debug_run_dir / f"frame_{frame_idx:06d}_{side_suffix}.jpg"
+                save_debug_frame(
+                    detection_frame,
+                    landmarks,
+                    frame_idx,
+                    side_states,
+                    output_path,
+                )
+                debug_frames_count += 1
+
+            if annotated_path is not None:
+                annotated_frame = annotate_video_frame(
+                    detection_frame,
+                    landmarks,
+                    frame_idx,
+                    side_states,
+                )
+                if annotated_writer is None:
+                    height, width = annotated_frame.shape[:2]
+                    annotated_writer = imageio_ffmpeg.write_frames(
+                        str(annotated_path),
+                        (width, height),
+                        pix_fmt_in="rgb24",
+                        pix_fmt_out="yuv420p",
+                        fps=fps,
+                        codec="libx264",
+                        quality=7,
+                        macro_block_size=1,
+                        ffmpeg_log_level="warning",
+                        output_params=["-movflags", "+faststart"],
+                    )
+                    annotated_writer.send(None)
+                rgb_annotated = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                annotated_writer.send(np.ascontiguousarray(rgb_annotated))
+
+            previous_angles["left"] = left_knee_deg
+            previous_angles["right"] = right_knee_deg
+
             if preview:
                 cv2.imshow("MediaPipe Tasks Pose", detection_frame)
                 key = cv2.waitKey(1) & 0xFF
@@ -223,6 +406,9 @@ def process_video(
                     break
 
             frame_idx += 1
+
+    if annotated_writer is not None:
+        annotated_writer.close()
 
     cap.release()
     landmarker.close()
@@ -235,11 +421,18 @@ def process_video(
         "frames": frame_idx,
         "pose_found_pct": found_frames / total * 100,
         "good_core_pct": good_core_frames / total * 100,
+        "debug_frames_dir": str(debug_run_dir) if debug_run_dir is not None else None,
+        "debug_frames_count": debug_frames_count,
+        "annotated_video_path": (
+            str(annotated_path) if annotated_writer is not None else None
+        ),
     }
 
     print(f"Saved: {csv_path}")
     print(f"Pose found: {stats['pose_found_pct']:.1f}%")
     print(f"Good core landmarks: {stats['good_core_pct']:.1f}%")
+    print(f"Debug frames: {stats['debug_frames_count']} ({stats['debug_frames_dir']})")
+    print(f"Annotated video: {stats['annotated_video_path']}")
 
     return stats
 
@@ -274,6 +467,15 @@ def parse_args():
         action="store_true",
         help="Do not open an OpenCV preview window. Useful for app/server processing.",
     )
+    parser.add_argument(
+        "--debug-frames-dir",
+        default="debug_frames",
+        help="Directory for annotated suspicious frames.",
+    )
+    parser.add_argument(
+        "--annotated-video",
+        help="Optional H.264 MP4 output with the detected skeleton and knee angles.",
+    )
     return parser.parse_args()
 
 
@@ -287,4 +489,6 @@ def main():
         resize_height=args.resize_height,
         min_vis=args.min_vis,
         preview=not args.no_preview,
+        debug_frames_dir=args.debug_frames_dir,
+        annotated_video_path=args.annotated_video,
     )

@@ -4,7 +4,16 @@ import json
 
 import numpy as np
 
-from .config import ANALYSIS_VISIBILITY_THRESHOLD, CORE_LANDMARKS, DEFAULT_CSV_PATH
+from .config import (
+    ANALYSIS_VISIBILITY_THRESHOLD,
+    CORE_LANDMARKS,
+    DEFAULT_CSV_PATH,
+    ROM_DROP_ABS_THRESHOLD_DEG,
+    ROM_DROP_REL_THRESHOLD,
+    ROM_JUMP_THRESHOLD_DEG,
+    ROM_REL_DROP_MIN_RAW_DEG,
+    ROM_VISIBILITY_THRESHOLD,
+)
 from .utils import moving_avg_nan, to_float
 
 
@@ -66,6 +75,148 @@ def nanmean_pair(a, b):
 def read_rows(csv_path):
     with open(csv_path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def optional_round(value, digits=3):
+    if value is None or not np.isfinite(value):
+        return None
+    return round(float(value), digits)
+
+
+def series_extrema(values, frame_numbers):
+    values = np.asarray(values, dtype=float)
+    valid = np.flatnonzero(np.isfinite(values))
+    if len(valid) == 0:
+        return {"min": None, "max": None}
+
+    min_idx = valid[np.argmin(values[valid])]
+    max_idx = valid[np.argmax(values[valid])]
+    return {
+        "min": {
+            "frame": int(frame_numbers[min_idx]),
+            "angle_deg": round(float(values[min_idx]), 2),
+        },
+        "max": {
+            "frame": int(frame_numbers[max_idx]),
+            "angle_deg": round(float(values[max_idx]), 2),
+        },
+    }
+
+
+def rom_value(values):
+    values = np.asarray(values, dtype=float)
+    if not np.any(np.isfinite(values)):
+        return np.nan
+    return float(np.nanmax(values) - np.nanmin(values))
+
+
+def validate_knee_rom(
+    csv_path=DEFAULT_CSV_PATH,
+    smoothing_window=SMOOTH_K,
+    jump_threshold_deg=ROM_JUMP_THRESHOLD_DEG,
+    visibility_threshold=ROM_VISIBILITY_THRESHOLD,
+):
+    """Validate knee-angle continuity and compare raw versus smoothed ROM."""
+    rows = read_rows(csv_path)
+    if len(rows) < 2:
+        raise RuntimeError("Too little data in CSV for ROM validation.")
+
+    frame_numbers = np.array(
+        [int(to_float(row.get("frame_idx", i))) for i, row in enumerate(rows)],
+        dtype=int,
+    )
+    time_s = np.array([to_float(row.get("t_ms")) / 1000.0 for row in rows], dtype=float)
+    side_config = {
+        "left": ("Lewe", "left_knee_deg", "L_KNEE_vis", "L_ANKLE_vis"),
+        "right": ("Prawe", "right_knee_deg", "R_KNEE_vis", "R_ANKLE_vis"),
+    }
+
+    series = []
+    suspicious = []
+    sides = {}
+
+    for side, (label, angle_col, knee_vis_col, ankle_vis_col) in side_config.items():
+        raw = np.array([to_float(row.get(angle_col)) for row in rows], dtype=float)
+        smoothed = moving_avg_nan(raw, smoothing_window)
+        knee_vis = np.array([to_float(row.get(knee_vis_col)) for row in rows], dtype=float)
+        ankle_vis = np.array([to_float(row.get(ankle_vis_col)) for row in rows], dtype=float)
+
+        delta = np.full(len(raw), np.nan, dtype=float)
+        delta[1:] = np.abs(np.diff(raw))
+        jump_mask = np.isfinite(delta) & (delta > jump_threshold_deg)
+        low_knee_mask = ~np.isfinite(knee_vis) | (knee_vis < visibility_threshold)
+        low_ankle_mask = ~np.isfinite(ankle_vis) | (ankle_vis < visibility_threshold)
+        suspicious_mask = jump_mask | low_knee_mask | low_ankle_mask
+
+        raw_rom = rom_value(raw)
+        smoothed_rom = rom_value(smoothed)
+        rom_drop = raw_rom - smoothed_rom
+        rom_drop_pct = rom_drop / raw_rom if np.isfinite(raw_rom) and raw_rom > 0 else np.nan
+        tracking_error = bool(
+            np.isfinite(rom_drop)
+            and np.isfinite(rom_drop_pct)
+            and (
+                rom_drop >= ROM_DROP_ABS_THRESHOLD_DEG
+                or (
+                    raw_rom >= ROM_REL_DROP_MIN_RAW_DEG
+                    and rom_drop_pct >= ROM_DROP_REL_THRESHOLD
+                )
+            )
+        )
+
+        sides[side] = {
+            "label": label,
+            "raw_rom_deg": optional_round(raw_rom, 2),
+            "smoothed_rom_deg": optional_round(smoothed_rom, 2),
+            "rom_drop_deg": optional_round(rom_drop, 2),
+            "rom_drop_pct": optional_round(rom_drop_pct * 100, 1),
+            "tracking_error": tracking_error,
+            "raw_extrema": series_extrema(raw, frame_numbers),
+            "smoothed_extrema": series_extrema(smoothed, frame_numbers),
+            "jump_count": int(np.sum(jump_mask)),
+            "low_visibility_count": int(np.sum(low_knee_mask | low_ankle_mask)),
+        }
+
+        for i in range(len(rows)):
+            point = {
+                "frame": int(frame_numbers[i]),
+                "time_s": optional_round(time_s[i], 3),
+                "side": side,
+                "side_label": label,
+                "angle_raw_deg": optional_round(raw[i], 3),
+                "angle_smoothed_deg": optional_round(smoothed[i], 3),
+                "angle_change_deg": optional_round(delta[i], 3),
+                "knee_visibility": optional_round(knee_vis[i], 3),
+                "ankle_visibility": optional_round(ankle_vis[i], 3),
+                "is_jump": bool(jump_mask[i]),
+            }
+            series.append(point)
+
+            if suspicious_mask[i]:
+                reasons = []
+                if jump_mask[i]:
+                    reasons.append(f"skok kąta > {jump_threshold_deg:g}°")
+                if low_knee_mask[i]:
+                    reasons.append(f"visibility kolana < {visibility_threshold:g}")
+                if low_ankle_mask[i]:
+                    reasons.append(f"visibility kostki < {visibility_threshold:g}")
+
+                suspicious.append({**point, "reasons": reasons})
+
+    suspicious_frames = sorted({item["frame"] for item in suspicious})
+    return {
+        "smoothing_window": int(smoothing_window),
+        "jump_threshold_deg": float(jump_threshold_deg),
+        "visibility_threshold": float(visibility_threshold),
+        "rom_drop_abs_threshold_deg": ROM_DROP_ABS_THRESHOLD_DEG,
+        "rom_drop_rel_threshold_pct": ROM_DROP_REL_THRESHOLD * 100,
+        "rom_rel_drop_min_raw_deg": ROM_REL_DROP_MIN_RAW_DEG,
+        "tracking_error": any(side["tracking_error"] for side in sides.values()),
+        "sides": sides,
+        "series": series,
+        "suspicious_frames": suspicious,
+        "suspicious_frame_numbers": suspicious_frames,
+    }
 
 
 def get_xy(rows, name, visibility_threshold):

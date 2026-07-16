@@ -1,8 +1,9 @@
 from pathlib import Path
 
+import altair as alt
 import streamlit as st
 
-from src.running_biomechanics.analysis import analyze_csv
+from src.running_biomechanics.analysis import analyze_csv, validate_knee_rom
 from src.running_biomechanics.pose_extraction import process_video
 from src.running_biomechanics.report import build_report, report_to_markdown
 
@@ -308,15 +309,164 @@ def save_uploaded_video(uploaded_file):
 
 def run_analysis(video_path, crop_mode):
     csv_path = APP_RUNS_DIR / "run_landmarks.csv"
-    process_video(
+    annotated_video_path = APP_RUNS_DIR / "annotated_run.mp4"
+    processing_stats = process_video(
         source=str(video_path),
         csv_path=str(csv_path),
         crop_mode=crop_mode,
         resize_height=720,
         preview=False,
+        debug_frames_dir="debug_frames",
+        annotated_video_path=str(annotated_video_path),
     )
     result = analyze_csv(str(csv_path))
-    return build_report(result, source_name=video_path.name)
+    report = build_report(result, source_name=video_path.name)
+    validation = validate_knee_rom(str(csv_path))
+    validation["debug_frames_dir"] = processing_stats["debug_frames_dir"]
+    validation["debug_frames_count"] = processing_stats["debug_frames_count"]
+    if validation["tracking_error"]:
+        if report["status"] == "usable":
+            report["status"] = "needs_review"
+        report["status_label"] = "Prawdopodobny błąd śledzenia"
+        report["summary"] += (
+            " Walidacja ROM wykazała duży spadek zakresu ruchu po wygładzeniu danych."
+        )
+        report["recommendation"] = (
+            "Zweryfikuj oznaczone klatki przed interpretacją zakresu ruchu kolan."
+        )
+    report["rom_validation"] = validation
+    report["annotated_video_path"] = processing_stats["annotated_video_path"]
+    return report
+
+
+def extrema_caption(extrema):
+    minimum = extrema.get("min")
+    maximum = extrema.get("max")
+    if minimum is None or maximum is None:
+        return "Brak wystarczających danych o ekstremach."
+    return (
+        f"Minimum: klatka {minimum['frame']} ({minimum['angle_deg']}°) · "
+        f"maksimum: klatka {maximum['frame']} ({maximum['angle_deg']}°)"
+    )
+
+
+def render_rom_validation(validation):
+    st.markdown("### Walidacja ROM kolan")
+
+    if validation["tracking_error"]:
+        st.error(
+            "ROM wyraźnie zmniejszył się po wygładzeniu. "
+            "Wynik oznaczono jako prawdopodobny błąd śledzenia."
+        )
+    else:
+        st.success("Wygładzenie nie spowodowało podejrzanie dużego spadku ROM.")
+
+    chart_data = validation["series"]
+    color = alt.Color(
+        "side_label:N",
+        title="Kolano",
+        scale=alt.Scale(domain=["Lewe", "Prawe"], range=["#ff7a2f", "#65d44d"]),
+    )
+    base = alt.Chart(alt.Data(values=chart_data)).encode(
+        x=alt.X("time_s:Q", title="Czas [s]"),
+        color=color,
+    )
+    raw_lines = base.mark_line(strokeWidth=1.5, opacity=0.55).encode(
+        y=alt.Y("angle_raw_deg:Q", title="Kąt kolana [°]"),
+        tooltip=[
+            alt.Tooltip("frame:Q", title="Klatka", format=".0f"),
+            alt.Tooltip("time_s:Q", title="Czas [s]", format=".3f"),
+            alt.Tooltip("side_label:N", title="Strona"),
+            alt.Tooltip("angle_raw_deg:Q", title="Kąt surowy [°]", format=".1f"),
+        ],
+    )
+    smoothed_lines = base.mark_line(strokeWidth=2.5, strokeDash=[7, 4]).encode(
+        y=alt.Y("angle_smoothed_deg:Q", title="Kąt kolana [°]"),
+    )
+    jump_data = [point for point in chart_data if point["is_jump"]]
+    jump_points = (
+        alt.Chart(alt.Data(values=jump_data))
+        .mark_point(filled=True, size=100, color="#e45835", stroke="white", strokeWidth=1)
+        .encode(
+            x=alt.X("time_s:Q", title="Czas [s]"),
+            y=alt.Y("angle_raw_deg:Q", title="Kąt kolana [°]"),
+            tooltip=[
+                alt.Tooltip("frame:Q", title="Klatka", format=".0f"),
+                alt.Tooltip("side_label:N", title="Strona"),
+                alt.Tooltip("angle_raw_deg:Q", title="Kąt [°]", format=".1f"),
+                alt.Tooltip("angle_change_deg:Q", title="Zmiana [°]", format=".1f"),
+                alt.Tooltip("knee_visibility:Q", title="Visibility kolana", format=".2f"),
+                alt.Tooltip("ankle_visibility:Q", title="Visibility kostki", format=".2f"),
+            ],
+        )
+    )
+    st.altair_chart((raw_lines + smoothed_lines + jump_points).interactive())
+    st.caption(
+        "Linia ciągła: dane surowe · linia przerywana: dane wygładzone · "
+        "czerwone punkty: zmiana kąta większa niż 30°."
+    )
+
+    side_columns = st.columns(2)
+    for column, side_key in zip(side_columns, ("left", "right")):
+        side = validation["sides"][side_key]
+        with column:
+            with st.container(border=True):
+                st.markdown(f"**{side['label']} kolano**")
+                metrics = st.columns(3)
+                metrics[0].metric("ROM surowy", f"{side['raw_rom_deg']}°")
+                metrics[1].metric("ROM wygładzony", f"{side['smoothed_rom_deg']}°")
+                metrics[2].metric("Spadek ROM", f"{side['rom_drop_deg']}°")
+                st.caption(extrema_caption(side["raw_extrema"]))
+                st.caption(
+                    f"Po wygładzeniu — {extrema_caption(side['smoothed_extrema']).lower()}"
+                )
+                st.caption(
+                    f"Skoki >30°: {side['jump_count']} · "
+                    f"niska visibility: {side['low_visibility_count']}"
+                )
+                if side["tracking_error"]:
+                    st.warning("Prawdopodobny błąd śledzenia dla tej strony.")
+
+    suspicious = validation["suspicious_frames"]
+    st.markdown("#### Podejrzane klatki")
+    if suspicious:
+        table_rows = [
+            {
+                "Klatka": item["frame"],
+                "Czas [s]": item["time_s"],
+                "Strona": item["side_label"],
+                "Kąt [°]": item["angle_raw_deg"],
+                "Zmiana [°]": item["angle_change_deg"],
+                "Visibility kolana": item["knee_visibility"],
+                "Visibility kostki": item["ankle_visibility"],
+                "Powód": "; ".join(item["reasons"]),
+            }
+            for item in suspicious
+        ]
+        st.dataframe(
+            table_rows,
+            column_config={
+                "Klatka": st.column_config.NumberColumn(format="%d"),
+                "Czas [s]": st.column_config.NumberColumn(format="%.3f"),
+                "Kąt [°]": st.column_config.NumberColumn(format="%.1f"),
+                "Zmiana [°]": st.column_config.NumberColumn(format="%.1f"),
+                "Visibility kolana": st.column_config.NumberColumn(format="%.2f"),
+                "Visibility kostki": st.column_config.NumberColumn(format="%.2f"),
+            },
+            hide_index=True,
+        )
+    else:
+        st.success("Nie wykryto podejrzanych klatek.")
+
+    st.caption(
+        f"Wyeksportowano {validation['debug_frames_count']} oznaczonych klatek do: "
+        f"{validation['debug_frames_dir']}"
+    )
+
+
+def reset_analysis_state():
+    st.session_state.pop("report", None)
+    st.session_state.pop("markdown_report", None)
 
 
 def main():
@@ -331,7 +481,12 @@ def main():
     )
 
     with st.sidebar:
-        uploaded_file = st.file_uploader("Nagranie", type=["mp4", "mov", "avi", "mkv"])
+        uploaded_file = st.file_uploader(
+            "Nagranie",
+            type=["mp4", "mov", "avi", "mkv"],
+            key="video_upload",
+            on_change=reset_analysis_state,
+        )
         crop_mode = st.selectbox(
             "Kadrowanie",
             ["none", "left", "right", "center"],
@@ -356,13 +511,24 @@ def main():
         return
 
     video_path = save_uploaded_video(uploaded_file)
-    st.video(str(video_path))
+    report = st.session_state.get("report")
+    annotated_video_path = report.get("annotated_video_path") if report else None
+    video_placeholder = st.empty()
+    video_caption = st.empty()
+    if annotated_video_path and Path(annotated_video_path).exists():
+        video_placeholder.video(annotated_video_path)
+        video_caption.caption("Nagranie z wykrytym szkieletem i kątami kolan.")
+    else:
+        video_placeholder.video(str(video_path))
+        video_caption.caption("Po analizie nagranie zostanie zastąpione wersją ze szkieletem.")
 
     if analyze:
         with st.spinner("Analizowanie nagrania..."):
             report = run_analysis(video_path, crop_mode)
             st.session_state["report"] = report
             st.session_state["markdown_report"] = report_to_markdown(report)
+            video_placeholder.video(report["annotated_video_path"])
+            video_caption.caption("Nagranie z wykrytym szkieletem i kątami kolan.")
 
     report = st.session_state.get("report")
     if not report:
@@ -387,6 +553,8 @@ def main():
     for col, html in zip(cols, cards):
         with col:
             st.markdown(html, unsafe_allow_html=True)
+
+    render_rom_validation(report["rom_validation"])
 
     st.markdown("### Obserwacje")
     for observation in report["observations"]:

@@ -5,6 +5,7 @@ __pycache__/
 .git_broken_backup*/
 
 *.mp4
+*.MOV
 run_landmarks*.csv
 report*.json
 report*.md
@@ -13,3 +14,4 @@ pose_quality_frame.jpg
 pose_quality_checks/
 metrics_checks/
 app_runs/
+debug_frames/

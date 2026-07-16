@@ -41,6 +41,12 @@ Detect pose landmarks:
 .\.venv\Scripts\python.exe pose_video.py --source path\to\video.mp4 --csv run_landmarks.csv --no-preview
 ```
 
+Save a browser-compatible H.264 video with the detected skeleton and knee angles:
+
+```powershell
+.\.venv\Scripts\python.exe pose_video.py --source path\to\video.mp4 --csv run_landmarks.csv --annotated-video annotated_run.mp4 --no-preview
+```
+
 For split-screen or screen-recorded videos:
 
 ```powershell
@@ -76,6 +82,23 @@ Plot knee angles:
 ```powershell
 .\.venv\Scripts\python.exe plot_angles.py --csv run_landmarks.csv
 ```
+
+## Knee ROM Validation
+
+The upload app validates raw knee angles against a 5-frame moving average. It:
+
+- plots raw and smoothed left/right knee angles,
+- marks frame-to-frame angle jumps above 30 degrees,
+- reports knee and ankle visibility for suspicious frames,
+- lists the frames containing minimum and maximum knee angles,
+- compares raw and smoothed ROM,
+- flags a likely tracking error when smoothing reduces ROM substantially.
+
+During pose extraction, frames with an angle jump above 30 degrees or knee/ankle
+visibility below 0.60 are saved under `debug_frames/<video-and-timestamp>/` with
+the skeleton, highlighted joints, knee angles, and visibility values overlaid.
+After analysis, the upload app replaces the original preview with the generated
+H.264 video containing the detected skeleton and knee-angle labels.
 
 ## Future App Integration
 
