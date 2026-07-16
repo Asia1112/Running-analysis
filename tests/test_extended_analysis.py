@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.running_biomechanics.extended_analysis import analyze_extended_metrics
+from src.running_biomechanics.analysis import cadence_status, report_status
+from src.running_biomechanics.extended_analysis import _build_reliability, analyze_extended_metrics
 
 
 LANDMARKS = [
@@ -14,6 +15,50 @@ LANDMARKS = [
 
 
 class ExtendedAnalysisTests(unittest.TestCase):
+    def test_cadence_and_report_use_the_same_reliability_thresholds(self):
+        result = {
+            "cadence": 254.4,
+            "cadence_left": 294.8,
+            "cadence_right": 213.9,
+            "lr_cadence_difference": 80.9,
+            "events": 11,
+            "coverage": 0.94,
+            "core_visible_pct": 94.0,
+            "knee_rom_difference_deg": 4.0,
+            "trunk_lean_mean_deg": 5.8,
+            "report_status": "low_confidence",
+        }
+        details = {
+            "hips": {
+                "available": True,
+                "left": {"valid_pct": 95.0},
+                "right": {"valid_pct": 95.0},
+            },
+            "trunk": {"valid_pct": 95.0},
+            "technique": {"overstriding_available": True},
+        }
+
+        reliability = _build_reliability(result, {"tracking_error": False}, details)
+
+        self.assertEqual(cadence_status(result), "low_confidence")
+        self.assertEqual(report_status(result), "low_confidence")
+        self.assertEqual(reliability["cadence"]["level"], "unreliable")
+        self.assertIn("254.4", reliability["cadence"]["reason"])
+
+    def test_large_left_right_difference_requires_review_everywhere(self):
+        result = {
+            "cadence": 180.0,
+            "lr_cadence_difference": 20.0,
+            "events": 10,
+            "coverage": 0.92,
+            "core_visible_pct": 92.0,
+            "knee_rom_difference_deg": 4.0,
+            "trunk_lean_mean_deg": 5.0,
+        }
+
+        self.assertEqual(cadence_status(result), "needs_review")
+        self.assertEqual(report_status(result), "needs_review")
+
     def test_builds_quality_gated_joint_and_technique_metrics(self):
         fieldnames = ["frame_idx", "t_ms", "left_knee_deg", "right_knee_deg"]
         for name in LANDMARKS:

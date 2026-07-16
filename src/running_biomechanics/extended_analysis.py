@@ -4,6 +4,7 @@ from .analysis import (
     MIN_SEP_HARD,
     PROMINENCE_TH,
     SMOOTH_K,
+    cadence_status,
     filter_minima_by_sep,
     find_local_minima_strong,
     get_xy,
@@ -46,12 +47,36 @@ def _build_reliability(result, validation, details):
     events = result.get("events", 0)
     coverage = result.get("coverage", 0)
     core_visible = result.get("core_visible_pct", 0)
-    if np.isfinite(cadence_value) and events >= 8 and coverage >= 0.80:
-        cadence = _reliability("good", "Wykryto wystarczającą liczbę zdarzeń przy dobrym pokryciu punktów.")
-    elif np.isfinite(cadence_value) and events >= 5 and coverage >= 0.65:
-        cadence = _reliability("review", "Liczba zdarzeń lub pokrycie punktów ogranicza pewność wyniku.")
+    cadence_level = cadence_status(result)
+    if cadence_level == "low_confidence":
+        if np.isfinite(cadence_value) and (cadence_value < 140 or cadence_value > 220):
+            reason = (
+                f"Kadencja {cadence_value:.1f} kroków/min jest poza zakresem "
+                "140–220; wykrywanie zdarzeń chodu jest prawdopodobnie niestabilne."
+            )
+        else:
+            reason = (
+                "Za mało stabilnych zdarzeń lub zbyt słabe pokrycie punktów "
+                "do wiarygodnego wyznaczenia rytmu."
+            )
+        cadence = _reliability("unreliable", reason)
+    elif cadence_level == "needs_review":
+        reasons = []
+        if cadence_value < 160 or cadence_value > 200:
+            reasons.append("kadencja jest poza typowym zakresem 160–200")
+        if result.get("lr_cadence_difference", 0) > 15:
+            reasons.append("różnica L/P przekracza 15 kroków/min")
+        if events < 8 or coverage < 0.80 or core_visible < 85:
+            reasons.append("liczba zdarzeń lub jakość punktów ogranicza pewność")
+        cadence = _reliability(
+            "review",
+            "; ".join(reasons).capitalize() + ".",
+        )
     else:
-        cadence = _reliability("unreliable", "Za mało stabilnych zdarzeń do wiarygodnego wyznaczenia rytmu.")
+        cadence = _reliability(
+            "good",
+            "Kadencja, różnica L/P, liczba zdarzeń i pokrycie punktów spełniają progi wiarygodności.",
+        )
 
     if core_visible < 70:
         knee = _reliability("unreliable", "Widoczność głównych punktów kończyn dolnych jest zbyt niska.")

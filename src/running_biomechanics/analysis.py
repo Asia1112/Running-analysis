@@ -472,23 +472,40 @@ def classify_metric_flags(result):
     return flags
 
 
-def report_status(result):
-    """App-facing decision about whether the automatic report is trustworthy."""
+def cadence_status(result):
+    """Classify cadence reliability using the same thresholds as the report."""
+    cadence_value = result.get("cadence", np.nan)
     if (
-        result["coverage"] < 0.70
-        or result["core_visible_pct"] < 75
-        or result["events"] < 5
-        or result["cadence"] < 140
-        or result["cadence"] > 220
+        not np.isfinite(cadence_value)
+        or result.get("coverage", 0) < 0.70
+        or result.get("core_visible_pct", 0) < 75
+        or result.get("events", 0) < 5
+        or cadence_value < 140
+        or cadence_value > 220
     ):
         return "low_confidence"
 
+    lr_difference = result.get("lr_cadence_difference", np.nan)
     if (
-        result["cadence"] < 160
-        or result["cadence"] > 200
-        or result["coverage"] < 0.80
-        or result["core_visible_pct"] < 85
-        or result["lr_cadence_difference"] > 15
+        cadence_value < 160
+        or cadence_value > 200
+        or result.get("coverage", 0) < 0.80
+        or result.get("core_visible_pct", 0) < 85
+        or (np.isfinite(lr_difference) and lr_difference > 15)
+    ):
+        return "needs_review"
+
+    return "usable"
+
+
+def report_status(result):
+    """App-facing decision about whether the automatic report is trustworthy."""
+    cadence_reliability = cadence_status(result)
+    if cadence_reliability == "low_confidence":
+        return "low_confidence"
+
+    if (
+        cadence_reliability == "needs_review"
         or result["knee_rom_difference_deg"] > 12
         or abs(result["trunk_lean_mean_deg"]) > 15
     ):
