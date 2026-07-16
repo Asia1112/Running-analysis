@@ -12,9 +12,17 @@ APP_RUNS_DIR.mkdir(exist_ok=True)
 
 
 STATUS_META = {
-    "usable": ("Good", "#65d44d"),
-    "needs_review": ("Okay", "#d5b82f"),
-    "low_confidence": ("Review", "#e45835"),
+    "usable": ("Dobrze", "#65d44d"),
+    "needs_review": ("Weryfikacja", "#d5b82f"),
+    "low_confidence": ("Niska pewność", "#e45835"),
+}
+
+
+CROP_LABELS = {
+    "none": "Bez kadrowania",
+    "left": "Lewa połowa",
+    "right": "Prawa połowa",
+    "center": "Środek",
 }
 
 
@@ -261,32 +269,32 @@ def build_cards(report):
 
     return [
         card(
-            "Cadence",
-            f"{metrics['cadence_spm']} spm",
+            "Kadencja",
+            f"{metrics['cadence_spm']} kroków/min",
             cadence_score,
-            "Good" if cadence_score >= 75 else "Okay" if cadence_score >= 50 else "Bad",
-            "Step rhythm estimate",
+            "Dobrze" if cadence_score >= 75 else "Uwaga" if cadence_score >= 50 else "Słabo",
+            "Szacowane tempo kroków",
         ),
         card(
-            "Left-right symmetry",
+            "Symetria lewa–prawa",
             f"{metrics['symmetry_score']}/100",
             symmetry_score,
-            "Good" if symmetry_score >= 75 else "Okay" if symmetry_score >= 50 else "Bad",
-            "Cadence and knee ROM balance",
+            "Dobrze" if symmetry_score >= 75 else "Uwaga" if symmetry_score >= 50 else "Słabo",
+            "Równowaga kadencji i zakresu ruchu kolan",
         ),
         card(
-            "Trunk position",
-            f"{metrics['trunk_lean_mean_deg']} deg",
+            "Pozycja tułowia",
+            f"{metrics['trunk_lean_mean_deg']}°",
             trunk_score,
-            "Good" if trunk_score >= 75 else "Okay" if trunk_score >= 50 else "Bad",
-            "Average side-view lean",
+            "Dobrze" if trunk_score >= 75 else "Uwaga" if trunk_score >= 50 else "Słabo",
+            "Średnie pochylenie w widoku z boku",
         ),
         card(
-            "Recording quality",
-            quality["label"].title(),
+            "Jakość nagrania",
+            quality["label"].capitalize(),
             quality_score,
-            "Good" if quality_score >= 85 else "Okay" if quality_score >= 70 else "Bad",
-            "Pose coverage and visibility",
+            "Dobrze" if quality_score >= 85 else "Uwaga" if quality_score >= 70 else "Słabo",
+            "Pokrycie i widoczność pozy",
         ),
     ]
 
@@ -304,8 +312,6 @@ def run_analysis(video_path, crop_mode):
         source=str(video_path),
         csv_path=str(csv_path),
         crop_mode=crop_mode,
-        target_pose="auto",
-        num_poses=2,
         resize_height=720,
         preview=False,
     )
@@ -314,30 +320,35 @@ def run_analysis(video_path, crop_mode):
 
 
 def main():
-    st.set_page_config(page_title="Running Analysis", page_icon="RUN", layout="wide")
+    st.set_page_config(page_title="Analiza biegu", page_icon="RUN", layout="wide")
     inject_styles()
 
-    st.markdown("<h2>Analysis</h2>", unsafe_allow_html=True)
-    st.markdown("# Running Analysis")
+    st.markdown("<h2>Analiza</h2>", unsafe_allow_html=True)
+    st.markdown("# Analiza biegu")
     st.markdown(
-        '<div class="hero-subtitle">Upload a side-view running video and generate a technique report.</div>',
+        '<div class="hero-subtitle">Prześlij nagranie biegu z boku i wygeneruj raport techniki.</div>',
         unsafe_allow_html=True,
     )
 
     with st.sidebar:
-        uploaded_file = st.file_uploader("Video", type=["mp4", "mov", "avi", "mkv"])
-        crop_mode = st.selectbox("Crop", ["none", "left", "right", "center"], index=0)
-        analyze = st.button("Analyze", use_container_width=True, disabled=uploaded_file is None)
+        uploaded_file = st.file_uploader("Nagranie", type=["mp4", "mov", "avi", "mkv"])
+        crop_mode = st.selectbox(
+            "Kadrowanie",
+            ["none", "left", "right", "center"],
+            index=0,
+            format_func=CROP_LABELS.get,
+        )
+        analyze = st.button("Analizuj", width="stretch", disabled=uploaded_file is None)
 
     if uploaded_file is None:
         st.markdown(
             """
             <div class="status-strip">
                 <div>
-                    <div class="status-title">Waiting for video</div>
-                    <div class="status-copy">Choose a running video from the sidebar.</div>
+                    <div class="status-title">Oczekiwanie na nagranie</div>
+                    <div class="status-copy">Wybierz nagranie biegu w panelu bocznym.</div>
                 </div>
-                <div class="pill" style="background: #d5b82f;">Ready</div>
+                <div class="pill" style="background: #d5b82f;">Gotowe</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -348,7 +359,7 @@ def main():
     st.video(str(video_path))
 
     if analyze:
-        with st.spinner("Analyzing video..."):
+        with st.spinner("Analizowanie nagrania..."):
             report = run_analysis(video_path, crop_mode)
             st.session_state["report"] = report
             st.session_state["markdown_report"] = report_to_markdown(report)
@@ -357,7 +368,7 @@ def main():
     if not report:
         return
 
-    status_label, status_color = STATUS_META.get(report["status"], ("Review", "#d5b82f"))
+    status_label, status_color = STATUS_META.get(report["status"], ("Weryfikacja", "#d5b82f"))
     st.markdown(
         f"""
         <div class="status-strip">
@@ -377,18 +388,18 @@ def main():
         with col:
             st.markdown(html, unsafe_allow_html=True)
 
-    st.markdown("### Observations")
+    st.markdown("### Obserwacje")
     for observation in report["observations"]:
         st.markdown(f'<div class="observation-card">{observation}</div>', unsafe_allow_html=True)
 
-    st.markdown("### Recommendation")
+    st.markdown("### Zalecenie")
     st.markdown(f'<div class="observation-card">{report["recommendation"]}</div>', unsafe_allow_html=True)
 
     markdown_report = st.session_state["markdown_report"]
     st.download_button(
-        "Download report",
+        "Pobierz raport",
         data=markdown_report,
-        file_name="running_report.md",
+        file_name="raport_biegu.md",
         mime="text/markdown",
     )
 

@@ -7,67 +7,75 @@ from .config import DEFAULT_CSV_PATH
 
 
 STATUS_LABELS = {
-    "usable": "Usable automatic assessment",
-    "needs_review": "Assessment requires verification",
-    "low_confidence": "Low-confidence recording",
+    "usable": "Wiarygodna ocena automatyczna",
+    "needs_review": "Ocena wymaga weryfikacji",
+    "low_confidence": "Nagranie o niskiej wiarygodności",
 }
 
 
 def status_summary(status):
     if status == "usable":
         return (
-            "The recording quality and biomechanical signals are sufficient for an "
-            "automatic preliminary running-technique assessment."
+            "Jakość nagrania i sygnały biomechaniczne są wystarczające do "
+            "automatycznej, wstępnej oceny techniki biegu."
         )
     if status == "needs_review":
         return (
-            "The system detected usable pose data, but one or more metrics should be "
-            "verified before making a strong conclusion."
+            "System wykrył użyteczne dane pozy, ale co najmniej jeden wskaźnik "
+            "należy zweryfikować przed sformułowaniem jednoznacznych wniosków."
         )
 
     return (
-        "The recording or detected motion pattern is not reliable enough for a strong "
-        "automatic technique assessment."
+        "Nagranie lub wykryty wzorzec ruchu nie są wystarczająco wiarygodne, "
+        "aby przeprowadzić jednoznaczną automatyczną ocenę techniki."
     )
 
 
 def quality_label(result):
     if result["coverage"] >= 0.85 and result["core_visible_pct"] >= 85:
-        return "good"
+        return "dobra"
     if result["coverage"] >= 0.70 and result["core_visible_pct"] >= 75:
-        return "moderate"
-    return "limited"
+        return "umiarkowana"
+    return "ograniczona"
 
 
 def cadence_observation(result):
     cadence = result["cadence"]
     if cadence < 160:
-        return "Cadence is relatively low for running, which may indicate longer steps or possible overstriding."
+        return "Kadencja jest stosunkowo niska, co może wskazywać na dłuższe kroki lub nadmierne wydłużanie kroku."
     if cadence > 200:
-        return "Cadence is very high; the gait-event detection should be verified."
-    return "Cadence is within a typical recreational running range."
+        return "Kadencja jest bardzo wysoka; należy zweryfikować wykrywanie zdarzeń chodu."
+    return "Kadencja mieści się w typowym zakresie dla biegu rekreacyjnego."
 
 
 def symmetry_observation(result):
     if result["lr_cadence_difference"] > 15 or result["knee_rom_difference_deg"] > 12:
         return (
-            "Left-right symmetry requires attention because cadence or knee range of "
-            "motion differs between sides."
+            "Symetria lewej i prawej strony wymaga uwagi, ponieważ kadencja lub "
+            "zakres ruchu kolan różnią się między stronami."
         )
-    return "Left-right rhythm and knee range of motion are relatively balanced."
+    return "Rytm lewej i prawej strony oraz zakres ruchu kolan są względnie zrównoważone."
 
 
 def trunk_observation(result):
     trunk = result["trunk_lean_mean_deg"]
     if abs(trunk) > 15:
-        return "Average trunk lean is elevated in the selected analysis window."
-    return "Average trunk lean is not elevated in the selected analysis window."
+        return "Średnie pochylenie tułowia jest podwyższone w wybranym oknie analizy."
+    return "Średnie pochylenie tułowia nie jest podwyższone w wybranym oknie analizy."
 
 
 def vertical_motion_observation(result):
     if result["vertical_oscillation_proxy"] > 0.035:
-        return "Hip vertical oscillation proxy is elevated, which may indicate excessive up-down movement."
-    return "Hip vertical oscillation proxy is within the expected range for this video-based estimate."
+        return "Szacowana oscylacja pionowa bioder jest podwyższona, co może oznaczać nadmierny ruch góra–dół."
+    return "Szacowana oscylacja pionowa bioder mieści się w oczekiwanym zakresie dla analizy wideo."
+
+
+def report_recommendation(status):
+    if status == "usable":
+        return "Automatyczna ocena może zostać przedstawiona użytkownikowi."
+    if status == "needs_review":
+        return "Pokaż raport, ale oznacz wykryte nieprawidłowości jako wymagające weryfikacji."
+    return "Nie wyciągaj jednoznacznych wniosków z tego nagrania; poproś o lepsze nagranie."
 
 
 def build_report(result, source_name=None):
@@ -78,17 +86,14 @@ def build_report(result, source_name=None):
         vertical_motion_observation(result),
     ]
 
-    if result["flags"]:
-        observations.extend(result["flags"])
-
     return {
-        "title": "Running Technique Report",
+        "title": "Raport techniki biegu",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source": source_name,
         "status": result["report_status"],
         "status_label": STATUS_LABELS.get(result["report_status"], result["report_status"]),
         "summary": status_summary(result["report_status"]),
-        "recommendation": result["recommendation"],
+        "recommendation": report_recommendation(result["report_status"]),
         "quality": {
             "label": quality_label(result),
             "coverage_pct": round(result["coverage"] * 100, 1),
@@ -115,9 +120,9 @@ def build_report(result, source_name=None):
         },
         "observations": observations,
         "limitations": [
-            "Metrics are estimated from 2D side-view video and should be treated as proxy values.",
-            "Results depend on full-body visibility, stable camera position, and correct runner selection.",
-            "Detected irregularities should be verified with better recordings or expert review.",
+            "Wskaźniki są szacowane na podstawie dwuwymiarowego nagrania z boku i należy je traktować jako wartości przybliżone.",
+            "Wyniki zależą od widoczności całego ciała i stabilnego ustawienia kamery.",
+            "Wykryte nieprawidłowości należy zweryfikować na lepszym nagraniu lub skonsultować ze specjalistą.",
         ],
     }
 
@@ -131,35 +136,35 @@ def report_to_markdown(report):
         f"# {report['title']}",
         "",
         f"Status: {report['status_label']}",
-        f"Quality: {quality['label']} ({quality['coverage_pct']}% coverage, {quality['core_visible_pct']}% core visibility)",
-        f"Analysis window: {window['start_s']}s - {window['end_s']}s, events={window['events']}",
+        f"Jakość: {quality['label']} (pokrycie {quality['coverage_pct']}%, widoczność głównych punktów {quality['core_visible_pct']}%)",
+        f"Okno analizy: {window['start_s']} s – {window['end_s']} s, zdarzenia: {window['events']}",
         "",
-        "## Summary",
+        "## Podsumowanie",
         "",
         report["summary"],
         "",
-        "## Key Metrics",
+        "## Najważniejsze wskaźniki",
         "",
-        f"- Cadence: {metrics['cadence_spm']} spm",
-        f"- Left/right cadence: {metrics['cadence_left_spm']} / {metrics['cadence_right_spm']} spm",
-        f"- Knee ROM left/right: {metrics['left_knee_rom_deg']} / {metrics['right_knee_rom_deg']} deg",
-        f"- Knee ROM difference: {metrics['knee_rom_difference_deg']} deg",
-        f"- Trunk lean: {metrics['trunk_lean_mean_deg']} deg",
-        f"- Vertical oscillation proxy: {metrics['vertical_oscillation_proxy']}",
-        f"- Symmetry score: {metrics['symmetry_score']}/100",
+        f"- Kadencja: {metrics['cadence_spm']} kroków/min",
+        f"- Kadencja lewa/prawa: {metrics['cadence_left_spm']} / {metrics['cadence_right_spm']} kroków/min",
+        f"- Zakres ruchu kolan lewego/prawego: {metrics['left_knee_rom_deg']}° / {metrics['right_knee_rom_deg']}°",
+        f"- Różnica zakresu ruchu kolan: {metrics['knee_rom_difference_deg']}°",
+        f"- Pochylenie tułowia: {metrics['trunk_lean_mean_deg']}°",
+        f"- Szacowana oscylacja pionowa: {metrics['vertical_oscillation_proxy']}",
+        f"- Wynik symetrii: {metrics['symmetry_score']}/100",
         "",
-        "## Observations",
+        "## Obserwacje",
         "",
     ]
 
     lines.extend(f"- {observation}" for observation in report["observations"])
     lines.extend([
         "",
-        "## Recommendation",
+        "## Zalecenie",
         "",
         report["recommendation"],
         "",
-        "## Limitations",
+        "## Ograniczenia",
         "",
     ])
     lines.extend(f"- {limitation}" for limitation in report["limitations"])

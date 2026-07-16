@@ -75,31 +75,6 @@ def resize_for_detection(frame, resize_height):
     return cv2.resize(frame, (int(w * scale), resize_height), interpolation=cv2.INTER_CUBIC)
 
 
-def pose_quality_score(landmarks):
-    core_indexes = [LANDMARKS_TO_SAVE[name] for name in CORE_LANDMARKS]
-    visibility = [landmarks[idx].visibility for idx in core_indexes]
-    xs = [landmarks[idx].x for idx in core_indexes]
-    ys = [landmarks[idx].y for idx in core_indexes]
-    bbox_area = max(0.0, max(xs) - min(xs)) * max(0.0, max(ys) - min(ys))
-
-    return float(np.mean(visibility) + 0.15 * bbox_area)
-
-
-def select_pose(all_poses, target_pose):
-    if not all_poses:
-        return None
-
-    if target_pose in {"left", "right"}:
-        def center_x(landmarks):
-            xs = [landmarks[idx].x for idx in LANDMARKS_TO_SAVE.values()]
-            return float(np.mean(xs))
-
-        ordered = sorted(all_poses, key=center_x)
-        return ordered[0] if target_pose == "left" else ordered[-1]
-
-    return max(all_poses, key=pose_quality_score)
-
-
 def draw_landmarks(frame, landmarks, color=(0, 255, 0)):
     h, w = frame.shape[:2]
 
@@ -134,8 +109,6 @@ def process_video(
     model_path=MODEL_PATH,
     csv_path=DEFAULT_CSV_PATH,
     crop_mode="none",
-    target_pose="auto",
-    num_poses=2,
     resize_height=720,
     min_vis=VISIBILITY_THRESHOLD,
     preview=True,
@@ -150,7 +123,7 @@ def process_video(
     options = vision.PoseLandmarkerOptions(
         base_options=base_options,
         running_mode=vision.RunningMode.VIDEO,
-        num_poses=max(1, num_poses),
+        num_poses=1,
     )
     landmarker = vision.PoseLandmarker.create_from_options(options)
 
@@ -189,7 +162,7 @@ def process_video(
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             result = landmarker.detect_for_video(mp_image, t_ms)
 
-            landmarks = select_pose(result.pose_landmarks, target_pose)
+            landmarks = result.pose_landmarks[0] if result.pose_landmarks else None
             pose_found = landmarks is not None
             left_knee_deg = np.nan
             right_knee_deg = np.nan
@@ -285,18 +258,6 @@ def parse_args():
         help="Crop obvious screen recordings or split-screen videos before detection.",
     )
     parser.add_argument(
-        "--target-pose",
-        choices=["auto", "left", "right"],
-        default="auto",
-        help="Which detected person to keep when multiple poses are enabled.",
-    )
-    parser.add_argument(
-        "--num-poses",
-        type=int,
-        default=2,
-        help="Detect more than one pose, then select the best/target pose.",
-    )
-    parser.add_argument(
         "--resize-height",
         type=int,
         default=720,
@@ -323,8 +284,6 @@ def main():
         model_path=args.model,
         csv_path=args.csv,
         crop_mode=args.crop,
-        target_pose=args.target_pose,
-        num_poses=args.num_poses,
         resize_height=args.resize_height,
         min_vis=args.min_vis,
         preview=not args.no_preview,
