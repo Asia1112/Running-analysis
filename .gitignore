@@ -17,3 +17,13 @@ app_runs/
 debug_frames/
 output/
 tmp/
+
+# Research data (directory structure is kept with .gitkeep files)
+data/raw/*
+data/extracted/*
+data/reference/*
+data/results/*
+!data/raw/.gitkeep
+!data/extracted/.gitkeep
+!data/reference/.gitkeep
+!data/results/.gitkeep

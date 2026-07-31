@@ -1,6 +1,7 @@
 mediapipe
 opencv-python
 numpy
+pandas
 matplotlib
 streamlit
 imageio-ffmpeg
