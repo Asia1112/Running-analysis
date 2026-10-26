@@ -1,2 +1,0 @@
-"""Running biomechanics analysis package."""
-

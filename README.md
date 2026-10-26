@@ -17,24 +17,56 @@ medycznym.
 ## Architektura
 
 ```text
-src/knee_angle_validation/
-  pose_extraction.py       MediaPipe, film i kanoniczny format klatek
-  knee_angle.py            wspólna geometria MediaPipe/referencja
-  smoothing.py             mediana, średnia krocząca, Savitzky-Golay
-  frame_quality.py         visibility, skoki i jakość pojedynczej klatki
-  reference_annotation.py wybór klatek i rekord anotacji
-  annotation_component.py klikalna anotacja Streamlit CCv2
-  validation.py            łączenie danych i błędy punktów/kąta
-  statistics.py            MAE, RMSE, bias, grupy i korelacje
-  io_utils.py              zapis, odczyt i kontrola schematu CSV
-  config.py                konfigurowalne progi badawcze
-app.py                     osiem widoków procesu badawczego
-data/                      raw, extracted, reference, results
-legacy/                    opis zachowanej warstwy zgodności
+pose_run/
+  app.py                       interfejs Streamlit
+  pose_video.py                ekstrakcja z CLI
+  analyze_run_csv.py            walidacja z CLI
+  plot_angles.py                wykres kątów z CLI
+  generate_report.py            tabela statystyk jako HTML
+  requirements.txt              zależności aktualnego projektu
+  .streamlit/config.toml        wygląd aplikacji
+  models/
+    pose_landmarker_full.task   model MediaPipe
+  src/knee_angle_validation/
+    __init__.py                publiczna funkcja kąta
+    pose_extraction.py         MediaPipe, wideo i odczyt klatek
+    knee_angle.py              geometria kąta 2D
+    smoothing.py               filtry sygnału
+    frame_quality.py           heurystyki jakości klatek
+    reference_annotation.py    wybór klatek i rekord anotacji
+    annotation_component.py    klikalna anotacja Streamlit
+    validation.py              łączenie danych i obliczanie błędów
+    statistics.py              statystyki opisowe
+    io_utils.py                odczyt, zapis i schemat CSV
+    config.py                  progi badawcze
+    models.py                  wynik oceny jakości klatki
+  tests/                       testy aktualnego pakietu
+  data/
+    raw/                       oryginalne nagrania
+    extracted/                 punkty i kąty MediaPipe
+    reference/                 wybór klatek i ręczne anotacje
+    results/                   wyniki walidacji i statystyki
+  archive/pilot/               lokalne wyniki wcześniejszych prób
 ```
 
-Dotychczasowy pakiet `src/running_biomechanics` pozostaje wyłącznie dla
-odtwarzalności wcześniejszych eksperymentów. Nowa aplikacja go nie importuje.
+Projekt zawiera jeden pakiet analityczny: `src/knee_angle_validation`.
+Starszy pakiet `running_biomechanics` i jego dwa testy zostały usunięte.
+Kadencja, ocena techniki biegu, symetria, analiza bioder, tułowia i ramion
+nie należą do aktualnego zakresu.
+
+Nagrania z katalogu głównego przeniesiono bez zmiany nazw do `data/raw/`.
+Istniejące wyniki, raporty i obrazy diagnostyczne zachowano w `archive/pilot/`.
+Opis archiwum znajduje się w [archive/pilot/README.md](archive/pilot/README.md).
+Archiwalne CSV używają starszego schematu i nie są wejściem aktualnego CLI.
+
+## Zasady pracy z plikami
+
+- Polecenia uruchamiaj z katalogu głównego projektu.
+- Oryginały nagrań przechowuj w `data/raw/`; wyników nie zapisuj obok kodu.
+- Przy ekstrakcji kolejnego filmu podawaj osobną ścieżkę `--csv`.
+- Dla osobnych porównań podawaj osobne `--results` i `--summary`.
+- Dane badawcze i wyniki są pomijane przez Git; wymagają osobnej kopii zapasowej.
+- Środowisko `.venv` oraz ustawienia PyCharma pozostają lokalne.
 
 ## Uruchomienie
 
@@ -47,7 +79,8 @@ Ekstrakcja poza interfejsem:
 
 ```powershell
 .\.venv\Scripts\python.exe pose_video.py `
-  --source data\raw\run.mp4 --video-id video_001 `
+  --source data\raw\run13.MOV --video-id video_001 `
+  --csv data\extracted\video_001.csv `
   --person-id person_001 --side left
 ```
 
@@ -55,8 +88,10 @@ Walidacja poza interfejsem:
 
 ```powershell
 .\.venv\Scripts\python.exe analyze_run_csv.py `
-  --extracted data\extracted\extracted_landmarks.csv `
-  --reference data\reference\reference_annotations.csv
+  --extracted data\extracted\video_001.csv `
+  --reference data\reference\reference_annotations.csv `
+  --results data\results\video_001_validation.csv `
+  --summary data\results\video_001_summary.csv
 ```
 
 Testy:
@@ -106,3 +141,21 @@ rysowane dopiero po wybraniu wszystkich trzech punktów.
   powtórzone sesje i analizować zgodność między nimi.
 - Progi wiarygodności w konfiguracji są początkowe i powinny zostać
   skalibrowane na podstawie zebranych wyników, a nie interpretowane jako normy.
+
+## Stan po uporządkowaniu repozytorium
+
+Porządkowanie struktury nie obejmowało napraw algorytmów. Przed właściwym
+badaniem pozostają m.in. następujące problemy wykryte podczas przeglądu:
+
+- Ekstrakcja oblicza kąt ze współrzędnych znormalizowanych osobno dla obu osi,
+  a anotacja z pikseli. Obie metody muszą używać tego samego układu pikselowego.
+- Wybór klatek z wielu warstw może zakończyć się błędem usuwania indeksów.
+- Zapis anotacji nie uwzględnia sesji w kluczu zastępowania poprzedniego wpisu.
+- Aplikacja używa wspólnych nazw filmów i wyników; trzeba powiązać stan i zapis
+  z identyfikatorem nagrania oraz przebiegu analizy.
+- Należy zweryfikować synchronizację punktów komponentu anotacyjnego,
+  rzeczywiste czasy i orientację klatek oraz obsługę brakujących danych.
+
+Podstawowe testy jednostkowe nie potwierdzają jeszcze poprawności całego
+procesu badawczego. Kolejny etap powinien zacząć się od geometrii kąta
+i bezpiecznego powiązania danych z nagraniem.

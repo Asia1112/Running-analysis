@@ -4,5 +4,4 @@ numpy
 pandas
 matplotlib
 streamlit
-imageio-ffmpeg
-reportlab
+altair

@@ -1,14 +1,6 @@
-"""Typed models shared by extraction, quality, and annotation modules."""
+"""Frame-quality result shared by extraction and quality assessment."""
 
 from dataclasses import dataclass, field
-
-
-@dataclass(frozen=True)
-class Point2D:
-    """A two-dimensional point in normalized or pixel coordinates."""
-
-    x: float
-    y: float
 
 
 @dataclass

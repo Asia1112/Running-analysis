@@ -5,18 +5,17 @@ __pycache__/
 .git_broken_backup*/
 
 *.mp4
+*.mov
 *.MOV
-run_landmarks*.csv
-report*.json
-report*.md
-angles.csv
-pose_quality_frame.jpg
-pose_quality_checks/
-metrics_checks/
-app_runs/
-debug_frames/
+*.avi
+*.mkv
+.pytest_cache/
 output/
 tmp/
+
+# Local pilot data, historical results and diagnostic images
+archive/pilot/**
+!archive/pilot/README.md
 
 # Research data (directory structure is kept with .gitkeep files)
 data/raw/*
