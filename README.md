@@ -21,6 +21,7 @@ pose_run/
   app.py                       interfejs Streamlit
   pose_video.py                ekstrakcja z CLI
   analyze_run_csv.py            walidacja z CLI
+  summarize_experiments.py      zbiorcze tabele z bilansów wielu nagrań
   plot_angles.py                wykres kątów z CLI
   generate_report.py            tabela statystyk jako HTML
   requirements.txt              zależności aktualnego projektu
@@ -139,6 +140,9 @@ data/results/analyses/ANALYSIS_ID/
   selected_reference_frames.csv
   reference_annotations.csv
   validation_results.csv
+  frame_inventory.csv
+  availability_summary.csv
+  recording_statistics.csv
   summary_statistics.csv
   overlays/
   validations/                   osobne porównania uruchomione z CLI
@@ -347,6 +351,79 @@ funkcją `calculate_knee_angle()`.
 
 ## Metryki
 
+### Bilans braków i tabele według nagrania, osoby i prędkości
+
+Walidacja zapisuje dwa rodzaje wyników. `validation_results.csv` zawiera
+porównania dla wspólnych kluczy obu metod. `frame_inventory.csv` jest pełnym
+bilansem unii kluczy: wszystkich klatek ekstrakcji, zaplanowanego wyboru oraz
+zapisanych referencji. Zachowuje także klatki bez pary i bez pomiaru; nie dopisuje
+im fikcyjnego kąta. „Wszystkie klatki” oznaczają analizowany fragment ekstrakcji,
+np. wybrane 20 s, a nie pozostałą część pełnego nagrania.
+
+Aplikacja korzysta z bieżącego wyboru klatek, a po ponownym wczytaniu analizy
+odczytuje `selected_reference_frames.csv` z jej katalogu. CLI robi to samo
+obok wejściowego CSV; opcja `--selected-frames` pozwala wskazać zapisany plan.
+Bez planu nie da się potwierdzić kompletności próby 30 klatek. Raport wyraźnie
+oznacza wtedy zakres jako istniejące wiersze anotacji; liczby zaplanowanych
+klatek i brakujących anotacji są puste, zamiast sugerować kompletność.
+
+Najważniejsze pola `availability_summary.csv`:
+
+| Pole | Znaczenie i mianownik |
+|---|---|
+| `n_source_frames` | Wszystkie wiersze ekstrakcji analizowanego fragmentu |
+| `n_mediapipe_available`, `n_mediapipe_missing` | Dostępny/brakujący skończony surowy kąt w ekstrakcji |
+| `mediapipe_available_pct` | Dostępne kąty MediaPipe / wszystkie klatki ekstrakcji × 100 |
+| `n_selected_reference` | Liczba rzeczywiście zaplanowanych unikalnych klatek; nie zakładamy automatycznie 30 |
+| `n_reference_scope` | Liczba klatek planu, a bez niego liczba zapisanych kluczy referencji |
+| `n_reference_annotations`, `n_not_annotated` | Zapisane/brakujące anotacje w zakresie planu |
+| `n_reference_available`, `n_reference_unavailable` | Dostępny/brakujący kąt referencyjny w zakresie próby |
+| `n_mediapipe_available_in_scope`, `n_mediapipe_unavailable_in_scope` | Dostępność MediaPipe w tym samym zakresie referencyjnym |
+| `n_paired_available`, `paired_available_pct` | Dwie dostępne wartości; odsetek względem `n_reference_scope` |
+| `n_primary_pairs` | Pary z referencją CLEAR wykorzystane w analizie głównej |
+| `n_recordings`, `n_persons` | Liczby nagrań i osób, odrębne od liczby klatek |
+
+W zakresie referencyjnym cztery rozłączne kategorie — `n_paired_available`,
+`n_only_mediapipe`, `n_only_reference`, `n_both_unavailable` — sumują się do
+`n_reference_scope`. Raport pokazuje osobno UNMARKABLE/UNCERTAIN/UNASSESSED,
+referencje i zaplanowane klatki bez wiersza ekstrakcji oraz anotacje spoza planu.
+Brak anotacji oznacza nieukończoną referencję, a nie błąd detektora; wiersz
+bez ekstrakcji również wymaga wyjaśnienia. Sama dostępność kąta nie dowodzi
+jego dokładności. Nie filtrujemy jej progami visibility.
+
+Referencje spoza zapisanego planu pozostają widoczne w bilansie i porównaniach,
+ale nie zwiększają próby głównej ani analizy wrażliwości. Brak kąta jednej
+metody nie usuwa klatki z mianownika dostępności. MAE/RMSE/bias wymagają par
+dwóch skończonych wartości; `n` w tabeli błędów oznacza liczbę takich par,
+a `n_reference_subset` — liczbę referencji w danym podzbiorze jakości.
+
+Widok statystyk i eksport zawierają tabele według `video_id`, `person_id`
+oraz `speed_kmh` (brak prędkości jest osobną grupą). Dodatkowo
+`recording_statistics.csv` ma oddzielny wiersz dla każdego nagrania i podzbioru
+CLEAR / CLEAR+UNCERTAIN / ewentualnie starszych nieocenionych pomiarów.
+Przy pojedynczym filmie podsumowanie według prędkości opisuje tylko ten film.
+
+Do wspólnego zestawienia wielu nagrań użyj bilansów, a nie sumowania tabel
+już zagregowanych:
+
+```powershell
+.\.venv\Scripts\python.exe summarize_experiments.py --inventories data\results\analyses\ID1\frame_inventory.csv data\results\analyses\ID2\frame_inventory.csv
+```
+
+Polecenie tworzy nowy katalog `data/results/study_reports/ID/` z bilansem
+dostępności, statystykami według filmu/osoby/prędkości i tabelą nagrań.
+Można wskazać nowy `--output-dir`. Import sprawdza spójność dostępności
+z kątami, unikalność klatek i pochodzenie danych. Powtórzenie tego samego
+filmu SHA-256 lub `analysis_id` jest blokowane: do zestawienia wybierz jedną
+analizę i jedną sesję referencyjną na film. Pozostałe sesje służą osobnemu
+badaniu powtarzalności. Starszy bilans bez identyfikacji filmu wymaga nowego raportu.
+
+Wyniki są **opisowe**. MAE/RMSE/bias zbiorczych grup są liczone po dostępnych
+parach, więc nagranie z większą liczbą par ma większy udział. Klatki z jednego
+filmu i tej samej osoby nie są niezależnymi obserwacjami. Tabela nagrań oraz
+liczby osób/nagrań pozwalają ocenić ten udział; nie wyznaczamy tu testów
+istotności ani przedziałów ufności traktujących klatki jako niezależne próby.
+
 ### Wygładzanie i brakujące pomiary
 
 Podstawą walidacji pozostaje **surowy kąt wyliczony z punktów pikselowych**.
@@ -459,8 +536,9 @@ Tabela jakości raportuje liczby i odsetki CLEAR/UNCERTAIN/UNMARKABLE oraz liczb
 par z poprawnym pomiarem obu metod. Jest zapisywana jako
 `reference_quality_summary.csv` i dostępna do pobrania. CLI zapisuje analogiczny
 plik obok podsumowania, z końcówką `_reference_quality.csv`.
-Liczebności dotyczą wierszy referencji dopasowanych po kluczu klatki; nie są
-jeszcze raportem kompletności całej próby ani brakujących kluczy po łączeniu.
+Liczebności jakości dotyczą zapisanych referencji w zakresie próby, także
+bez dopasowania do ekstrakcji. Brakujące anotacje i klucze są raportowane
+oddzielnie w pełnym bilansie `frame_inventory.csv` i `availability_summary.csv`.
 
 Starsze anotacje bez flag otrzymują `UNASSESSED`, a nie automatyczne CLEAR.
 Ich wyniki są raportowane osobno jako `legacy_unassessed`; nie trafiają do
@@ -507,8 +585,9 @@ Referencja zawierająca tylko jedną parę jest jednoznaczna bez tych argumentó
 Starszy CSV bez pól anotatora lub sesji wymaga ich świadomego uzupełnienia.
 Po błędzie aplikacja unieważnia poprzedni wynik w pamięci i nie zapisuje
 nowego CSV; istniejące pliki wynikowe pozostają bez zmian.
-Łączenie nadal jest typu `inner`: zawiera wyłącznie pasujące klucze.
-Sam brak duplikatów nie potwierdza kompletności pokrycia klatek referencyjnych.
+Tabela błędów nadal zawiera wyłącznie pasujące klucze. Aplikacja i CLI używają
+`compare_with_inventory`, który dodatkowo zachowuje wszystkie klucze w bilansie.
+Sam brak duplikatów nie zastępuje kontroli tego bilansu.
 
 Testy Python obejmują zachowanie sesji, ochronę przed zastąpieniem wpisu,
 awarię zapisu i przepływ stanu Streamlit. Testy JavaScript można uruchomić
@@ -543,5 +622,5 @@ badaniem pozostają m.in. następujące problemy wykryte podczas przeglądu:
   orientację klatek oraz obsługę brakujących danych. Nowe ekstrakcje zapisują PTS.
 
 Podstawowe testy jednostkowe nie potwierdzają jeszcze poprawności całego
-procesu badawczego. Kolejne etapy powinny objąć raportowanie kompletności
-dopasowania, orientację klatek i obsługę brakujących danych.
+procesu badawczego. Kolejne etapy powinny objąć orientację klatek i kontrolę
+całego procesu na rzeczywistych nagraniach oraz anotacjach.

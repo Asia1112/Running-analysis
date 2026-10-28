@@ -104,3 +104,63 @@ def merge_with_reference(extracted: pd.DataFrame, reference: pd.DataFrame, *,
     for point in ("hip", "knee", "ankle"):
         merged[f"{point}_distance_thigh_norm"] = merged[f"{point}_distance_px"] / thigh_length
     return merged
+
+
+def compare_with_inventory(extracted: pd.DataFrame, reference: pd.DataFrame, *,
+                           selected_frames: pd.DataFrame | None = None,
+                           annotator_id: str | None = None,
+                           session: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return paired errors and a lossless ledger of source, planned and reference keys."""
+    reference = select_reference_session(reference, annotator_id, session)
+    paired = merge_with_reference(extracted, reference)
+    source = add_pixel_angle_columns(_unique_measurements(extracted, "MediaPipe"))
+    manual = add_pixel_angle_columns(normalize_reference_quality(_unique_measurements(reference, "Referencja")), reference=True)
+    metadata_columns = [key for key in (*PROVENANCE_KEYS, *RANGE_KEYS, *TIMING_KEYS, *EXPERIMENT_KEYS,
+                                      "annotator_id", "annotation_session", "time_s", "min_visibility")
+                        if key not in JOIN_KEYS]
+    left = source[JOIN_KEYS + [key for key in metadata_columns if key in source]].copy()
+    left["angle_mediapipe"] = source.knee_flexion_deg
+    left["in_extraction"] = True
+    right = manual[JOIN_KEYS + [key for key in metadata_columns if key in manual] + ["frame_quality"]].copy()
+    right["angle_reference"] = manual.knee_flexion_deg
+    right["has_reference_row"] = True
+    ledger = left.merge(right, on=JOIN_KEYS, how="outer", validate="one_to_one", suffixes=("", "_ref_metadata"))
+    for key in metadata_columns:
+        alternative = key + "_ref_metadata"
+        if alternative in ledger:
+            ledger[key] = ledger[key].combine_first(ledger[alternative])
+            ledger = ledger.drop(columns=alternative)
+    if selected_frames is not None:
+        planned = _unique_measurements(selected_frames, "Wybór klatek")
+        if set(PROVENANCE_KEYS).intersection(source.columns) or set(PROVENANCE_KEYS).intersection(planned.columns):
+            if recording_metadata(source) != recording_metadata(planned):
+                raise ValueError("Wybór klatek pochodzi z innej analizy, filmu lub zakresu.")
+        if set(EXPERIMENT_KEYS).intersection(source.columns) or set(EXPERIMENT_KEYS).intersection(planned.columns):
+            if experiment_values(source) != experiment_values(planned):
+                raise ValueError("Wybór klatek ma inne metadane eksperymentu.")
+        selected = planned[JOIN_KEYS].copy()
+        selected["selected_for_reference"] = True
+        ledger = ledger.merge(selected, on=JOIN_KEYS, how="outer", validate="one_to_one")
+        # Selected-only rows retain their study identity without inventing measurements.
+        for key in metadata_columns:
+            if key in planned and key in ledger:
+                mapping = planned.set_index(JOIN_KEYS)[key]
+                values = pd.MultiIndex.from_frame(ledger[JOIN_KEYS]).map(mapping)
+                ledger[key] = ledger[key].combine_first(pd.Series(values, index=ledger.index))
+    else:
+        ledger["selected_for_reference"] = False
+    for key in ("in_extraction", "has_reference_row", "selected_for_reference"):
+        ledger[key] = ledger[key].eq(True)
+    ledger["selection_provided"] = selected_frames is not None
+    ledger["reference_scope"] = ledger.selected_for_reference if selected_frames is not None else ledger.has_reference_row
+    ledger["frame_quality"] = ledger.frame_quality.fillna("NOT_ANNOTATED")
+    ledger["mediapipe_available"] = ledger.in_extraction & np.isfinite(ledger.angle_mediapipe)
+    ledger["reference_available"] = ledger.has_reference_row & np.isfinite(ledger.angle_reference)
+    ledger["paired_available"] = ledger.mediapipe_available & ledger.reference_available
+    ledger["error_signed"] = (ledger.angle_mediapipe - ledger.angle_reference).where(ledger.paired_available)
+    # A singleton pair belongs to the whole ledger, including unannotated source rows.
+    for key in ("annotator_id", "annotation_session"):
+        ledger[key] = reference[key].iloc[0]
+    scope = ledger[JOIN_KEYS + ["selection_provided", "selected_for_reference", "reference_scope"]]
+    paired = paired.merge(scope, on=JOIN_KEYS, how="left", validate="one_to_one")
+    return paired, ledger.sort_values(JOIN_KEYS).reset_index(drop=True)

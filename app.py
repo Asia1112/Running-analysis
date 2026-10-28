@@ -27,9 +27,12 @@ from src.knee_angle_validation.reference_annotation import (
     select_reference_frames,
 )
 from src.knee_angle_validation.smoothing import smooth_series
-from src.knee_angle_validation.statistics import grouped_reference_statistics, reference_quality_summary, visibility_correlations
+from src.knee_angle_validation.statistics import (
+    grouped_reference_statistics, reference_quality_summary, visibility_correlations,
+    grouped_availability, recording_statistics,
+)
 from src.knee_angle_validation.reference_quality import POINTS, QUALITY_OPTIONS, frame_quality
-from src.knee_angle_validation.validation import merge_with_reference
+from src.knee_angle_validation.validation import compare_with_inventory
 from src.knee_angle_validation.provenance import (
     PROVENANCE_KEYS, RANGE_KEYS, TIMING_KEYS, file_sha256, new_analysis_id, recording_metadata, require_source_match,
 )
@@ -51,7 +54,7 @@ for directory in (RAW_DIR, EXTRACTED_DIR, REFERENCE_DIR, RESULTS_DIR):
 def _initialize_state() -> None:
     """Initialize all cross-view state in one place."""
     defaults = {
-        "extracted": None, "selected_frames": None, "validation": None,
+        "extracted": None, "selected_frames": None, "validation": None, "validation_inventory": None,
         "video_path": None, "crop_mode": "none", "side": "left",
         "annotation_drafts": {},
         "active_analysis_id": None, "source_sha256": None, "summary": None,
@@ -85,7 +88,7 @@ def _analysis_directory() -> Path:
 
 def _reset_analysis() -> None:
     """Invalidate all results and widget drafts before displaying another source."""
-    for key in ("extracted", "selected_frames", "validation", "summary", "active_analysis_id"):
+    for key in ("extracted", "selected_frames", "validation", "validation_inventory", "summary", "active_analysis_id"):
         st.session_state[key] = None
     st.session_state.annotation_drafts = {}
     for key in list(st.session_state):
@@ -562,7 +565,12 @@ def _validation_view(data: pd.DataFrame | None) -> None:
     pair = st.selectbox("Referencja do porównania (anotator / sesja)", pairs,
                         format_func=lambda item: f"{item[0]} / {item[1]}", key="validation_session")
     reference = reference.loc[reference.annotator_id.eq(pair[0]) & reference.annotation_session.eq(pair[1])]
-    reference_signature = hashlib.sha256(reference.to_csv(index=False).encode()).hexdigest()
+    selected = st.session_state.selected_frames
+    selected_path = _analysis_directory() / "selected_reference_frames.csv"
+    if selected is None and selected_path.exists():
+        selected = read_csv(selected_path)
+    reference_signature = hashlib.sha256((reference.to_csv(index=False) +
+        (selected.to_csv(index=False) if selected is not None else "NO_SELECTION")).encode()).hexdigest()
     if st.session_state.get("validation_reference_signature") != reference_signature:
         st.session_state.validation = None
         st.session_state.summary = None
@@ -571,12 +579,15 @@ def _validation_view(data: pd.DataFrame | None) -> None:
         st.session_state.validation = None
         st.session_state.summary = None
         try:
-            validation = merge_with_reference(data, reference, annotator_id=pair[0], session=pair[1])
-        except ValueError as error:
+            validation, inventory = compare_with_inventory(data, reference, selected_frames=selected,
+                                                            annotator_id=pair[0], session=pair[1])
+        except (ValueError, OSError) as error:
             st.error(str(error))
             return
         st.session_state.validation = validation
+        st.session_state.validation_inventory = inventory
         write_csv(validation, _analysis_directory() / "validation_results.csv")
+        write_csv(inventory, _analysis_directory() / "frame_inventory.csv")
     validation = st.session_state.validation
     if validation is not None:
         st.dataframe(validation[[
@@ -590,18 +601,33 @@ def _statistics_view() -> None:
     """Render error summaries, visibility bins, correlations, and point-error evidence."""
     st.subheader("Analiza statystyczna")
     validation = st.session_state.validation
-    if validation is None or validation.empty:
+    if validation is None:
         st.info("Najpierw wykonaj walidację.")
         return
+    inventory = st.session_state.validation_inventory
+    if inventory is None:
+        st.session_state.summary = None
+        st.info("Powtórz łączenie danych, aby utworzyć pełny bilans braków.")
+        return
     validation = validation.copy()
-    validation["visibility_group"] = validation["min_visibility"].map(classify_visibility)
-    quality_counts = reference_quality_summary(validation)
+    validation["visibility_group"] = validation.get("min_visibility", pd.Series(np.nan, index=validation.index)).map(classify_visibility)
+    inventory = inventory.copy()
+    inventory["visibility_group"] = inventory.get("min_visibility", pd.Series(np.nan, index=inventory.index)).map(classify_visibility)
+    availability = grouped_availability(inventory, ["video_id", "person_id", "speed_kmh"])
+    st.caption("Bilans obejmuje wszystkie klatki ekstrakcji, zaplanowane klatki i anotacje, także bez dopasowania. "
+               "Dostępny pomiar oznacza skończony surowy kąt; nie jest to ocena jego dokładności.")
+    st.dataframe(availability, hide_index=True)
+    write_csv(availability, _analysis_directory() / "availability_summary.csv")
+    if not inventory.selection_provided.all():
+        st.warning("Brak zapisanego wyboru klatek: nie można potwierdzić kompletności zaplanowanej próby. "
+                   "Zakres referencyjny obejmuje tylko istniejące wiersze anotacji; liczby zaplanowanych braków są puste.")
+    quality_counts = reference_quality_summary(inventory)
     st.caption("Analiza główna: CLEAR. Analiza wrażliwości: CLEAR + UNCERTAIN. "
                "UNMARKABLE pozostaje w liczebnościach; starsze pomiary UNASSESSED są raportowane osobno. "
-               "Liczebności poniżej dotyczą referencji dopasowanych do punktów po kluczu klatki.")
+               "Liczebności jakości obejmują zapisane referencje w zakresie próby, także bez pary MediaPipe.")
     st.dataframe(quality_counts, hide_index=True)
     write_csv(quality_counts, _analysis_directory() / "reference_quality_summary.csv")
-    summary = grouped_reference_statistics(validation, ["video_id", "person_id", "visibility_group"])
+    summary = grouped_reference_statistics(inventory, ["video_id", "person_id", "speed_kmh", "visibility_group"])
     summary["angle_definition"] = "knee_flexion_2d_deg"
     for key in (*PROVENANCE_KEYS, *RANGE_KEYS, *TIMING_KEYS, *EXPERIMENT_KEYS, "annotator_id", "annotation_session", "side"):
         if key in validation and validation[key].nunique(dropna=False) == 1:
@@ -609,7 +635,12 @@ def _statistics_view() -> None:
     st.session_state.summary = summary
     write_csv(summary, _analysis_directory() / "summary_statistics.csv")
     st.dataframe(summary, hide_index=True)
-    validation = validation.loc[validation.frame_quality.eq("CLEAR")].copy()
+    per_recording = recording_statistics(inventory)
+    st.caption("Wyniki są opisowe. Klatki jednej osoby i nagrania nie są niezależnymi obserwacjami; "
+               "do porównań osób i prędkości wykorzystaj także tabelę poszczególnych nagrań.")
+    st.dataframe(per_recording, hide_index=True)
+    write_csv(per_recording, _analysis_directory() / "recording_statistics.csv")
+    validation = validation.loc[validation.frame_quality.eq("CLEAR") & validation.reference_scope].copy()
     if validation.empty:
         st.info("Brak klatek CLEAR do głównych wykresów i analizy błędów punktów.")
         return
@@ -640,8 +671,12 @@ def _export_view(data: pd.DataFrame | None) -> None:
     reference_path = _analysis_directory() / "reference_annotations.csv"
     _download_csv("Anotacje referencyjne", read_reference_annotations(reference_path) if reference_path.exists() else None, "reference_annotations.csv")
     _download_csv("Wyniki walidacji", st.session_state.validation, "validation_results.csv")
-    _download_csv("Liczebności jakości referencji", reference_quality_summary(st.session_state.validation)
-                  if st.session_state.validation is not None else None, "reference_quality_summary.csv")
+    inventory = st.session_state.validation_inventory if st.session_state.validation is not None else None
+    if inventory is not None:
+        _download_csv("Bilans każdej klatki", inventory, "frame_inventory.csv")
+        _download_csv("Dostępność pomiarów", grouped_availability(inventory, ["video_id", "person_id", "speed_kmh"]), "availability_summary.csv")
+        _download_csv("Wyniki według nagrań", recording_statistics(inventory), "recording_statistics.csv")
+        _download_csv("Liczebności jakości referencji", reference_quality_summary(inventory), "reference_quality_summary.csv")
     if data is not None:
         suspicious = data[data["frame_quality_status"] != "reliable"]
         _download_csv("Podejrzane klatki", suspicious, "suspicious_frames.csv")
