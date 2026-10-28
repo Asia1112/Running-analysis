@@ -9,6 +9,7 @@ from .knee_angle import calculate_knee_angle
 from .annotation_storage import annotation_identity
 from .provenance import PROVENANCE_KEYS, RANGE_KEYS, TIMING_KEYS
 from .experiment_metadata import EXPERIMENT_KEYS
+from .reference_quality import POINTS, QUALITY_OPTIONS, QUALITY_COLUMNS, frame_quality
 
 
 REFERENCE_COLUMNS = [
@@ -20,6 +21,7 @@ REFERENCE_COLUMNS = [
     *RANGE_KEYS,
     *TIMING_KEYS, "time_s", "source_pts_s", "time_pts_s",
     *EXPERIMENT_KEYS,
+    *QUALITY_COLUMNS, "frame_quality",
 ]
 
 
@@ -88,21 +90,38 @@ def select_reference_frames(
 
 def build_reference_annotation(
     frame: pd.Series,
-    points: Sequence[tuple[float, float]],
+    points: Sequence[tuple[float, float] | None],
     annotator_id: str,
     annotation_session: str,
     notes: str = "",
+    point_qualities: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Build one reference record from ordered hip, knee, and ankle clicks."""
+    qualities = point_qualities if point_qualities is not None else {point: "CLEAR" for point in POINTS}
+    if set(qualities) != set(POINTS) or any(value not in QUALITY_OPTIONS for value in qualities.values()):
+        raise ValueError("Oceń biodro, kolano i kostkę: CLEAR, UNCERTAIN albo UNMARKABLE.")
+    if len(points) == 0 and all(value == "UNMARKABLE" for value in qualities.values()):
+        points = [None, None, None]
     if len(points) != 3:
         raise ValueError("Exactly three points are required: hip, knee, ankle")
     identity = annotation_identity(frame, annotator_id, annotation_session)
+    normalized = []
+    for point, coordinates in zip(POINTS, points):
+        if qualities[point] == "UNMARKABLE":
+            normalized.append((np.nan, np.nan))
+            continue
+        if coordinates is None or len(coordinates) != 2 or not np.isfinite(coordinates).all():
+            raise ValueError(f"Punkt {point} oznaczony jako CLEAR/UNCERTAIN wymaga zaznaczenia.")
+        normalized.append(tuple(float(value) for value in coordinates))
+    points = normalized
     hip, knee, ankle = points
     internal = calculate_knee_angle(hip, knee, ankle)
-    if not np.isfinite(internal):
+    if not np.isfinite(internal) and "UNMARKABLE" not in qualities.values():
         raise ValueError("Nie można obliczyć kąta z zaznaczonych punktów.")
     return {
         **identity,
+        **{f"{point}_quality": qualities[point] for point in POINTS},
+        "frame_quality": frame_quality([qualities[point] for point in POINTS]),
         **{key: frame[key] for key in PROVENANCE_KEYS if key in frame},
         **{key: frame[key] for key in RANGE_KEYS if key in frame},
         **{key: frame[key] for key in (*TIMING_KEYS, "time_s", "source_pts_s", "time_pts_s") if key in frame},

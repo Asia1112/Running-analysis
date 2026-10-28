@@ -7,6 +7,7 @@ from .knee_angle import add_pixel_angle_columns
 from .annotation_storage import select_reference_session
 from .provenance import PROVENANCE_KEYS, RANGE_KEYS, TIMING_KEYS, recording_metadata
 from .experiment_metadata import EXPERIMENT_KEYS, experiment_values
+from .reference_quality import normalize_reference_quality
 
 
 JOIN_KEYS = ["video_id", "person_id", "frame_number", "side"]
@@ -60,6 +61,7 @@ def merge_with_reference(extracted: pd.DataFrame, reference: pd.DataFrame, *,
     if not reference.columns.is_unique:
         raise ValueError("Referencja: powielone nazwy kolumn.")
     reference = select_reference_session(reference, annotator_id, session)
+    reference = normalize_reference_quality(reference)
     extracted = _unique_measurements(extracted, "MediaPipe")
     reference = _unique_measurements(reference, "Referencja")
     if set(PROVENANCE_KEYS).intersection(extracted.columns) or set(PROVENANCE_KEYS).intersection(reference.columns):

@@ -30,8 +30,8 @@ export default function(component) {
   const status = parentElement.querySelector('#status')
   const undo = parentElement.querySelector('#undo')
   const reset = parentElement.querySelector('#reset')
-  const labels = ['Biodro', 'Kolano', 'Kostka']
-   let points = Array.isArray(data.points) ? data.points.slice(0, 3).map(p => ({...p})) : []
+  const labels = Array.isArray(data.point_labels) ? data.point_labels : ['Biodro', 'Kolano', 'Kostka']
+  let points = Array.isArray(data.points) ? data.points.slice(0, labels.length).map(p => ({...p})) : []
 
   function draw() {
     const rect = image.getBoundingClientRect()
@@ -49,16 +49,16 @@ export default function(component) {
       ctx.lineTo(points[2].x * sx, points[2].y * sy); ctx.stroke()
     }
     points.forEach((point, index) => {
-      ctx.fillStyle = ['#43a5ff', '#ff7a2f', '#65d44d'][index]
+      ctx.fillStyle = {'Biodro':'#43a5ff', 'Kolano':'#ff7a2f', 'Kostka':'#65d44d'}[labels[index]]
       ctx.beginPath(); ctx.arc(point.x * sx, point.y * sy, 6, 0, Math.PI * 2); ctx.fill()
     })
-    status.textContent = points.length < 3 ? `${labels[points.length]} (${points.length + 1}/3)` : 'Anotacja kompletna'
+    status.textContent = points.length < labels.length ? `${labels[points.length]} (${points.length + 1}/${labels.length})` : 'Anotacja kompletna'
   }
   image.onload = draw
   if (image.src !== data.image) image.src = data.image
   else draw()
   canvas.onclick = (event) => {
-    if (points.length >= 3 || !image.naturalWidth) return
+    if (points.length >= labels.length || !image.naturalWidth) return
     const rect = canvas.getBoundingClientRect()
     if (!rect.width || !rect.height) return
     points.push({x:(event.clientX-rect.left)*image.naturalWidth/rect.width, y:(event.clientY-rect.top)*image.naturalHeight/rect.height})
@@ -79,13 +79,15 @@ def annotate_image(
     *,
     key: str,
     on_points_change: Callable[[], None] | None = None,
+    point_labels: list[str] | None = None,
 ) -> object:
     """Mount the reference annotator and return its component state."""
     if points is None:
         state = st.session_state.get(key, {})
         points = state.get("points", [])
     return _ANNOTATOR(
-        data={"image": image_data_url, "points": points or []},
+        data={"image": image_data_url, "points": points or [],
+              "point_labels": point_labels if point_labels is not None else ["Biodro", "Kolano", "Kostka"]},
         key=key,
         height="content",
         on_points_change=on_points_change or (lambda: None),

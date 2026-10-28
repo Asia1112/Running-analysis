@@ -27,7 +27,8 @@ from src.knee_angle_validation.reference_annotation import (
     select_reference_frames,
 )
 from src.knee_angle_validation.smoothing import smooth_series
-from src.knee_angle_validation.statistics import grouped_statistics, visibility_correlations
+from src.knee_angle_validation.statistics import grouped_reference_statistics, reference_quality_summary, visibility_correlations
+from src.knee_angle_validation.reference_quality import POINTS, QUALITY_OPTIONS, frame_quality
 from src.knee_angle_validation.validation import merge_with_reference
 from src.knee_angle_validation.provenance import (
     PROVENANCE_KEYS, RANGE_KEYS, TIMING_KEYS, file_sha256, new_analysis_id, recording_metadata, require_source_match,
@@ -90,7 +91,7 @@ def _reset_analysis() -> None:
     for key in list(st.session_state):
         if key in {"selection_start", "selection_end", "selection_count", "annotation_frame",
                    "overlay_frame", "overlay_crop", "overlay_video", "show_overlay",
-                   "validation_session", "validation_reference_signature", "reference_csv"} or key.startswith(("annotation_", "notes_annotation_")) and key not in {
+                   "validation_session", "validation_reference_signature", "reference_csv"} or key.startswith(("annotation_", "notes_annotation_", "quality_annotation_")) and key not in {
                        "annotation_session", "annotation_annotator", "annotation_drafts"}:
             del st.session_state[key]
 
@@ -470,19 +471,47 @@ def _annotation_view() -> None:
         st.error(str(error))
         return
     draft = st.session_state.annotation_drafts.setdefault(component_key, {"points": [], "notes": ""})
-    annotate_image(image_url, points=draft["points"], key=component_key,
-                   on_points_change=lambda: _remember_annotation_points(component_key))
-    points = draft["points"]
-    st.caption(f"Zaznaczono {len(points)}/3 punktów.")
+    qualities = draft.setdefault("qualities", {point: "CLEAR" for point in POINTS})
+    labels = dict(zip(POINTS, ("Biodro", "Kolano", "Kostka")))
+    st.caption("CLEAR: dobrze widoczny · UNCERTAIN: położenie niepewne · UNMARKABLE: nie da się wskazać. "
+               "UNMARKABLE nie wymaga kliknięcia. Nie zgaduj położenia niewidocznego stawu.")
+    columns = st.columns(3)
+    for column, point in zip(columns, POINTS):
+        qualities[point] = column.selectbox(f"Jakość: {labels[point]}", QUALITY_OPTIONS,
+                                            index=QUALITY_OPTIONS.index(qualities[point]),
+                                            key=f"quality_{component_key}_{point}")
+    markable = [point for point in POINTS if qualities[point] != "UNMARKABLE"]
+    if draft.get("point_mask") != markable:
+        draft["point_mask"] = markable
+        draft["point_revision"] = draft.get("point_revision", 0) + 1
+    points_key = f"{component_key}_points_{draft['point_revision']}"
+    point_draft = st.session_state.annotation_drafts.setdefault(points_key, {"points": [], "notes": ""})
+    if markable:
+        annotate_image(image_url, points=point_draft["points"], key=points_key,
+                       on_points_change=lambda: _remember_annotation_points(points_key),
+                       point_labels=[labels[point] for point in markable])
+    else:
+        st.image(frame, channels="BGR")
+    points = point_draft["points"]
+    st.caption(f"Zaznaczono {len(points)}/{len(markable)} wymaganych punktów. "
+               f"Ocena klatki: {frame_quality(list(qualities.values()))}.")
     notes = st.text_input("Notatki", value=draft["notes"], key=f"notes_{component_key}")
     draft["notes"] = notes
     if already_saved:
         st.info("Ta klatka jest już zapisana dla tego anotatora i sesji. Kolejny pomiar wymaga nowej sesji.")
     if st.button("Zapisz anotację", icon=":material/save:", key="save_annotation",
-                 disabled=len(points) != 3 or already_saved):
+                 disabled=len(points) != len(markable) or already_saved):
         try:
-            coordinates = [(float(point["x"]), float(point["y"])) for point in points]
-            record = build_reference_annotation(selected_row, coordinates, annotator_id, session_id, notes)
+            marked = iter(points)
+            coordinates = []
+            for point in POINTS:
+                if qualities[point] == "UNMARKABLE":
+                    coordinates.append(None)
+                else:
+                    clicked = next(marked)
+                    coordinates.append((float(clicked["x"]), float(clicked["y"])))
+            record = build_reference_annotation(selected_row, coordinates, annotator_id, session_id, notes,
+                                                point_qualities=qualities)
             record.update(frame_image_sha256=image_hash, image_width=frame.shape[1], image_height=frame.shape[0],
                           annotated_at=datetime.now().astimezone().isoformat())
             save_reference_annotation(record, path)
@@ -543,6 +572,7 @@ def _validation_view(data: pd.DataFrame | None) -> None:
     if validation is not None:
         st.dataframe(validation[[
             "video_id", "frame_number", "side", "angle_mediapipe", "angle_reference",
+            "frame_quality",
             "error_signed", "error_absolute", "hip_distance_px", "knee_distance_px", "ankle_distance_px",
         ]], hide_index=True)
 
@@ -556,7 +586,13 @@ def _statistics_view() -> None:
         return
     validation = validation.copy()
     validation["visibility_group"] = validation["min_visibility"].map(classify_visibility)
-    summary = grouped_statistics(validation, ["video_id", "person_id", "visibility_group"])
+    quality_counts = reference_quality_summary(validation)
+    st.caption("Analiza główna: CLEAR. Analiza wrażliwości: CLEAR + UNCERTAIN. "
+               "UNMARKABLE pozostaje w liczebnościach; starsze pomiary UNASSESSED są raportowane osobno. "
+               "Liczebności poniżej dotyczą referencji dopasowanych do punktów po kluczu klatki.")
+    st.dataframe(quality_counts, hide_index=True)
+    write_csv(quality_counts, _analysis_directory() / "reference_quality_summary.csv")
+    summary = grouped_reference_statistics(validation, ["video_id", "person_id", "visibility_group"])
     summary["angle_definition"] = "knee_flexion_2d_deg"
     for key in (*PROVENANCE_KEYS, *RANGE_KEYS, *TIMING_KEYS, *EXPERIMENT_KEYS, "annotator_id", "annotation_session", "side"):
         if key in validation and validation[key].nunique(dropna=False) == 1:
@@ -564,6 +600,10 @@ def _statistics_view() -> None:
     st.session_state.summary = summary
     write_csv(summary, _analysis_directory() / "summary_statistics.csv")
     st.dataframe(summary, hide_index=True)
+    validation = validation.loc[validation.frame_quality.eq("CLEAR")].copy()
+    if validation.empty:
+        st.info("Brak klatek CLEAR do głównych wykresów i analizy błędów punktów.")
+        return
     scatter = alt.Chart(validation).mark_circle(size=65).encode(
         x=alt.X("min_visibility:Q", title="Minimalne visibility"),
         y=alt.Y("error_absolute:Q", title="Błąd bezwzględny [°]"),
@@ -591,6 +631,8 @@ def _export_view(data: pd.DataFrame | None) -> None:
     reference_path = _analysis_directory() / "reference_annotations.csv"
     _download_csv("Anotacje referencyjne", read_reference_annotations(reference_path) if reference_path.exists() else None, "reference_annotations.csv")
     _download_csv("Wyniki walidacji", st.session_state.validation, "validation_results.csv")
+    _download_csv("Liczebności jakości referencji", reference_quality_summary(st.session_state.validation)
+                  if st.session_state.validation is not None else None, "reference_quality_summary.csv")
     if data is not None:
         suspicious = data[data["frame_quality_status"] != "reliable"]
         _download_csv("Podejrzane klatki", suspicious, "suspicious_frames.csv")

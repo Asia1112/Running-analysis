@@ -35,6 +35,7 @@ pose_run/
     smoothing.py               filtry sygnału
     frame_quality.py           heurystyki jakości klatek
     reference_annotation.py    wybór klatek i rekord anotacji
+    reference_quality.py       jakość ręcznej referencji i obsługa nieoznaczalnych punktów
     annotation_storage.py      bezpieczny zapis sesji bez zastępowania pomiarów
     provenance.py              identyfikacja filmu, analizy i geometrii obrazu
     video_timing.py            odczyt PTS i kontrola osi czasu CFR/VFR
@@ -383,6 +384,54 @@ biodro, kolano i kostkę; może cofnąć lub wyczyścić zaznaczenia. Odcinki s�
 rysowane dopiero po wybraniu wszystkich trzech punktów.
 
 ## Sesje anotacji i powtórne pomiary
+
+### Niepewność ręcznej referencji
+
+Przed zapisem oceń osobno biodro, kolano i kostkę:
+
+| Flaga | Znaczenie | Wymagane kliknięcie |
+|---|---|---|
+| `CLEAR` | Punkt dobrze widoczny | Tak |
+| `UNCERTAIN` | Położenie trudne do pewnego ustalenia | Tak, jeśli można je oszacować |
+| `UNMARKABLE` | Nie można wiarygodnie wskazać punktu | Nie |
+
+Komponent prosi o kliknięcia wyłącznie dla punktów innych niż `UNMARKABLE`,
+w kolejności biodro–kolano–kostka z pominięciem punktów nieoznaczalnych.
+Zmiana zestawu wymaganych punktów otwiera nowy szkic kliknięć, aby np. punkt
+kostki nie został zapisany jako kolano. Zmiana samej flagi CLEAR/UNCERTAIN
+zachowuje współrzędne. Flagi i notatki szkicu są przypisane do klatki oraz sesji.
+
+Jeżeli wszystkie punkty są `UNMARKABLE`, można zapisać klatkę bez żadnego
+kliknięcia. Pozostaje ona w CSV; nie zastępujemy jej inną klatką. Współrzędne
+nieoznaczalnego punktu i kąt referencyjny są puste (`NaN` w obliczeniach),
+nigdy równe 0. Pozostałe wskazane punkty są zachowywane. Notatka pozwala
+opisać przyczynę braku pomiaru. Pełna anotacja wymaga poprawnych, różnych
+punktów pozwalających obliczyć kąt; flagi nie służą do akceptowania błędnej geometrii.
+
+CSV zapisuje `hip_quality`, `knee_quality`, `ankle_quality` oraz `frame_quality`.
+Ocena klatki jest wyliczana: UNMARKABLE ma pierwszeństwo, następnie UNCERTAIN;
+CLEAR wymaga trzech punktów CLEAR. Ręczna ocena nie jest kopiowana z visibility
+ani z jakości detekcji MediaPipe.
+
+Walidacja zachowuje także wiersze UNMARKABLE. Główne statystyki
+(`analysis_subset=primary_clear`) obejmują kompletne pary z referencją CLEAR.
+Analiza wrażliwości (`sensitivity_clear_uncertain`) obejmuje CLEAR + UNCERTAIN.
+Wykresy błędów i zależności od visibility w widoku statystyk dotyczą CLEAR.
+Nie należy interpretować dobrego wyniku samego CLEAR jako dokładności dla
+wszystkich klatek — trzeba podać również wyniki analizy wrażliwości i liczebności.
+
+Tabela jakości raportuje liczby i odsetki CLEAR/UNCERTAIN/UNMARKABLE oraz liczbę
+par z poprawnym pomiarem obu metod. Jest zapisywana jako
+`reference_quality_summary.csv` i dostępna do pobrania. CLI zapisuje analogiczny
+plik obok podsumowania, z końcówką `_reference_quality.csv`.
+Liczebności dotyczą wierszy referencji dopasowanych po kluczu klatki; nie są
+jeszcze raportem kompletności całej próby ani brakujących kluczy po łączeniu.
+
+Starsze anotacje bez flag otrzymują `UNASSESSED`, a nie automatyczne CLEAR.
+Ich wyniki są raportowane osobno jako `legacy_unassessed`; nie trafiają do
+głównej analizy ani analizy wrażliwości. Nie nadpisujemy wcześniejszych pomiarów;
+ponowna anotacja z oceną jakości wymaga nowej sesji. Przy dopisywaniu do starego
+CSV jego wcześniejsze wiersze pozostają jawnie nieocenione.
 
 W zakładce „Ręczna anotacja” wybierz anotatora i identyfikator sesji.
 Przycisk „Nowa sesja pomiarowa” tworzy unikalny identyfikator, także przy

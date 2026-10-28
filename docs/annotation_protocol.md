@@ -87,6 +87,13 @@ Klatka otrzymuje `frame_quality = CLEAR`, gdy wszystkie trzy punkty mają `CLEAR
 
 **Zasada raportowania:** nie usuwaj po cichu trudnych klatek. Podaj liczbę i odsetek klatek z każdą flagą. Główne MAE/RMSE oblicz dla kompletnych klatek `CLEAR`; wyniki z uwzględnieniem `UNCERTAIN` przedstaw osobno jako analizę wrażliwości. Klatki `UNMARKABLE` raportuj jako brak pomiaru referencyjnego.
 
+**Implementacja:** formularz zapisuje `hip_quality`, `knee_quality`,
+`ankle_quality` i wyliczone `frame_quality`. Kliknięcia są wymagane tylko dla
+punktów CLEAR/UNCERTAIN; wszystkie punkty UNMARKABLE można zapisać bez kliknięć.
+Nieoznaczalne punkty i kąt pozostają puste, a klatka pozostaje w próbie.
+Starsze pomiary bez ocen mają techniczną etykietę `UNASSESSED` i są raportowane
+oddzielnie, bez automatycznego zaliczenia do CLEAR.
+
 ## 7. Format danych
 
 Proponowane kolumny `annotations.csv` (przechowywany poza publicznym repozytorium):

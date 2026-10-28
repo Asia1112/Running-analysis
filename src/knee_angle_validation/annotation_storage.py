@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from .provenance import PROVENANCE_KEYS, RANGE_KEYS, recording_metadata
 from .experiment_metadata import EXPERIMENT_KEYS, experiment_values
+from .reference_quality import normalize_reference_quality
 
 
 ANNOTATION_KEYS = ["video_id", "person_id", "frame_number", "side", "annotator_id", "annotation_session"]
@@ -85,6 +86,7 @@ def select_reference_session(data: pd.DataFrame, annotator_id: str | None = None
 def save_reference_annotation(record: dict[str, object], path: str | Path) -> Path:
     """Append a measurement; never replace an earlier session or same-key record."""
     identity = annotation_identity(record, record["annotator_id"], record["annotation_session"])
+    record = normalize_reference_quality(pd.DataFrame([record])).iloc[0].to_dict()
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     lock = output.with_name(output.name + ".lock")
@@ -96,6 +98,8 @@ def save_reference_annotation(record: dict[str, object], path: str | Path) -> Pa
     try:
         handle.close()
         existing = read_reference_annotations(output) if output.exists() else pd.DataFrame()
+        if not existing.empty:
+            existing = normalize_reference_quality(existing)
         if not existing.empty and (set(EXPERIMENT_KEYS).intersection(existing.columns) or
                                    set(EXPERIMENT_KEYS).intersection(record)):
             if experiment_values(existing) != experiment_values(pd.DataFrame([record])):

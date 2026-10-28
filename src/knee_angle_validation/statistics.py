@@ -6,7 +6,8 @@ import pandas as pd
 
 def error_statistics(data: pd.DataFrame) -> dict[str, float | int]:
     """Calculate core angle-error metrics for finite paired measurements."""
-    error = pd.to_numeric(data["error_signed"], errors="coerce").dropna()
+    numeric = pd.to_numeric(data["error_signed"], errors="coerce")
+    error = numeric.loc[np.isfinite(numeric)]
     absolute = error.abs()
     if error.empty:
         return {"n": 0, "mae": np.nan, "rmse": np.nan, "bias": np.nan}
@@ -30,6 +31,33 @@ def grouped_statistics(data: pd.DataFrame, group_columns: list[str]) -> pd.DataF
         for value, group in data.groupby(column, dropna=False):
             rows.append({"group_type": column, "group_value": value, **error_statistics(group)})
     return pd.DataFrame(rows)
+
+
+def reference_quality_summary(data: pd.DataFrame) -> pd.DataFrame:
+    """Count every matched reference row, including unavailable angles."""
+    labels = data.get("frame_quality", pd.Series("UNASSESSED", index=data.index))
+    errors = pd.to_numeric(data["error_signed"], errors="coerce")
+    return pd.DataFrame([
+        {"frame_quality": label, "n_reference": int(labels.eq(label).sum()),
+         "reference_pct": float(labels.eq(label).mean() * 100) if len(data) else np.nan,
+         "n_valid_pairs": int((labels.eq(label) & np.isfinite(errors)).sum())}
+        for label in ("CLEAR", "UNCERTAIN", "UNMARKABLE", "UNASSESSED")])
+
+
+def grouped_reference_statistics(data: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:
+    """Protocol: CLEAR primary; CLEAR+UNCERTAIN sensitivity; legacy separately."""
+    labels = data.get("frame_quality", pd.Series("UNASSESSED", index=data.index))
+    results = []
+    subsets = [("primary_clear", ["CLEAR"]), ("sensitivity_clear_uncertain", ["CLEAR", "UNCERTAIN"])]
+    if labels.eq("UNASSESSED").any():
+        subsets.append(("legacy_unassessed", ["UNASSESSED"]))
+    for name, allowed in subsets:
+        selected = data.loc[labels.isin(allowed)]
+        summary = grouped_statistics(selected, group_columns)
+        summary["analysis_subset"] = name
+        summary["n_reference_subset"] = len(selected)
+        results.append(summary)
+    return pd.concat(results, ignore_index=True)
 
 
 def visibility_correlations(data: pd.DataFrame, minimum_n: int = 3) -> pd.DataFrame:

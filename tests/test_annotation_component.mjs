@@ -17,8 +17,8 @@ function fixture() {
   const status = {}, undo = {}, reset = {};
   const elements = { '#frame': image, '#overlay': canvas, '#status': status, '#undo': undo, '#reset': reset };
   const events = [];
-  const mount = (points = []) => {
-    render({ data: {image: 'data:image/png;base64,test', points},
+  const mount = (points = [], point_labels) => {
+    render({ data: {image: 'data:image/png;base64,test', points, point_labels},
       parentElement: {querySelector: id => elements[id]},
       setStateValue: (key, value) => events.push({key, value}) });
     image.onload();
@@ -57,4 +57,21 @@ test('resizing the display preserves image coordinates', () => {
   f.mount();
   f.canvas.onclick({clientX: 10, clientY: 20});
   assert.deepEqual(f.events.at(-1).value, [{x: 40, y: 80}]);
+});
+
+test('skipped anatomical points change labels and click count without inventing coordinates', () => {
+  const f = fixture();
+  f.mount([], ['Biodro', 'Kostka']);
+  assert.equal(f.status.textContent, 'Biodro (1/2)');
+  f.canvas.onclick({clientX: 10, clientY: 20});
+  assert.equal(f.status.textContent, 'Kostka (2/2)');
+  f.canvas.onclick({clientX: 30, clientY: 40});
+  assert.equal(f.status.textContent, 'Anotacja kompletna');
+  assert.equal(f.events.at(-1).value.length, 2);
+  const count = f.events.length;
+  f.canvas.onclick({clientX: 50, clientY: 60});
+  assert.equal(f.events.length, count);
+  f.mount([], []);
+  f.canvas.onclick({clientX: 10, clientY: 20});
+  assert.equal(f.events.length, count);
 });

@@ -22,7 +22,7 @@ app.RESULTS_DIR = Path(st.session_state.test_directory)
 app._initialize_state()
 st.session_state.active_analysis_id = 'a' * 32
 st.session_state.source_sha256 = 'b' * 64
-def component(image, *, points, key, on_points_change):
+def component(image, *, points, key, on_points_change, point_labels):
     st.session_state.rendered_key = key
     st.session_state.rendered_points = [dict(p) for p in points]
     event = st.session_state.pop('points_event', None)
