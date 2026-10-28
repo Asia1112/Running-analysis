@@ -51,9 +51,10 @@ def upload(label, **kwargs):
         return Upload(value, 'points.csv', 'csv') if value else None
     content = st.session_state.get('video_bytes')
     return Upload(content, 'same_name.MOV', st.session_state.get('video_token', 'A')) if content else None
-def process(source, output, video_id, person_id, side, *, crop_mode, analysis_id):
+def process(source, output, video_id, person_id, side, *, crop_mode, analysis_id, experiment_metadata):
     data = pd.DataFrame([dict(video_id=video_id, person_id=person_id, side=side, frame_number=0,
-        analysis_id=analysis_id, source_sha256=file_sha256(source), crop_mode=crop_mode, resize_height=720)])
+        analysis_id=analysis_id, source_sha256=file_sha256(source), crop_mode=crop_mode, resize_height=720,
+        **experiment_metadata)])
     output.parent.mkdir(parents=True, exist_ok=True)
     data.to_csv(output, index=False)
     return SimpleNamespace(data=data, frames=1, pose_found_pct=100.)
@@ -165,6 +166,7 @@ with patch('app.read_analysis_frame', side_effect=AssertionError('wrong frame re
             at.session_state.video_bytes = b"video A"
             at.run()
             self.assertFalse(at.exception)
+            at.text_input(key='input_person_id').set_value('001').run()
             at.button[0].click().run()
             self.assertFalse(at.exception)
             first_id = at.session_state.active_analysis_id
@@ -186,6 +188,7 @@ with patch('app.read_analysis_frame', side_effect=AssertionError('wrong frame re
             self.assertEqual(at.session_state.annotation_drafts, {})
             self.assertNotIn('overlay_video', at.session_state)
             self.assertEqual(path_a.read_bytes(), b"video A")
+            at.text_input(key='input_person_id').set_value('001').run()
             at.button[0].click().run()
             second_id = at.session_state.active_analysis_id
             self.assertNotEqual(second_id, first_id)

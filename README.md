@@ -37,6 +37,7 @@ pose_run/
     reference_annotation.py    wybór klatek i rekord anotacji
     annotation_storage.py      bezpieczny zapis sesji bez zastępowania pomiarów
     provenance.py              identyfikacja filmu, analizy i geometrii obrazu
+    experiment_metadata.py     mapowanie tabeli osób, prędkości i stron nagrań
     annotation_component.py    klikalna anotacja Streamlit
     validation.py              łączenie danych i obliczanie błędów
     statistics.py              statystyki opisowe
@@ -170,6 +171,53 @@ Hash identyfikuje plik, ale nie potwierdza poprawności czasów VFR ani dekodowa
 i orientacji obrazu — te kwestie wymagają osobnej weryfikacji.
 
 ## Format danych CSV
+
+### Metadane eksperymentu
+
+Tabela `data/metadata/videos_metadata.csv` jest odczytywana z separatorem `;`.
+Obecny zbiór obejmuje 10 nagrań, 5 osób i prędkości 7.5 oraz 8.5 km/h.
+Dopasowanie korzysta z oryginalnej nazwy filmu, bez rozróżniania wielkości liter:
+
+| Pole tabeli | Pole analizy | Mapowanie |
+|---|---|---|
+| `original_filename` | `original_filename` | Oryginalna nazwa, zachowana mimo kopii filmu pod SHA-256 |
+| `participant_id` | `person_id` | Identyfikator tekstowy, np. `P01` |
+| `speed_kmh` | `speed_kmh` | Dodatnia liczba w km/h; akceptowany także przecinek dziesiętny |
+| `analyzed_side` | `side` | `RIGHT/LEFT` → `right/left` |
+| `inclusion_status` | `inclusion_status` | Ekstrakcja badawcza tylko dla `INCLUDED` |
+| `notes` | `metadata_notes` | Notatka dotycząca nagrania, oddzielna od notatki anotatora |
+
+Po wgraniu filmu z tabeli aplikacja uzupełnia osobę, stronę i prędkość;
+te pola są zablokowane do edycji, aby uniknąć sprzeczności z tabelą. Korekty
+wprowadź w tabeli przed nową ekstrakcją. Dla filmu spoza tabeli wpisz osobę,
+wybierz stronę i opcjonalnie podaj prędkość. Nieznana prędkość pozostaje pusta;
+aplikacja nie przypisuje jej wartości 0 ani prędkości poprzedniego nagrania.
+Zmiana metadanych wejściowych unieważnia poprzedni stan analizy.
+
+Nowe punkty, wybrane klatki, anotacje i wyniki zachowują te metadane.
+Manifest JSON i statystyki zapisują również `metadata_table_sha256`, czyli
+sumę SHA-256 wersji tabeli użytej podczas ekstrakcji (pustą dla danych ręcznych).
+Zapisane rekordy stanowią migawkę metadanych; późniejsza edycja tabeli nie
+zmienia historycznych wyników. Walidacja blokuje referencję z inną migawką
+metadanych, np. z przypisaną inną prędkością. Starszych CSV nie uzupełniamy
+automatycznie; do nowego schematu wykonaj nową ekstrakcję i anotację.
+
+Powielone nazwy, brak osoby/prędkości, niepoprawna strona lub status w tabeli
+powodują błąd. `EXCLUDED` i `PENDING` blokują ekstrakcję. Tabela opisuje dane
+eksperymentu; poprawność przypisania nazwy do osoby trzeba sprawdzić podczas
+przygotowywania nagrań. Podana prędkość dotyczy ustawienia bieżni.
+
+CLI również korzysta z tabeli. Dla znanego nagrania wystarczy:
+
+```powershell
+.\.venv\Scripts\python.exe pose_video.py --source data\raw\IMG_1302.MOV
+```
+
+Opcja `--metadata` wskazuje inną tabelę w tym samym formacie.
+Przy kopii filmu nazwanej sumą SHA-256 podaj dodatkowo
+`--original-filename IMG_1302.MOV`. Dla nagrań spoza tabeli wymagane są
+`--person-id` i `--side`; opcjonalnie podaj `--speed-kmh`.
+Sprzeczne wartości argumentów dla filmu z tabeli są odrzucane.
 
 ### Geometria i konwencja kąta
 

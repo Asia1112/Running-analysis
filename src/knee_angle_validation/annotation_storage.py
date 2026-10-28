@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile
 import numpy as np
 import pandas as pd
 from .provenance import PROVENANCE_KEYS, recording_metadata
+from .experiment_metadata import EXPERIMENT_KEYS, experiment_values
 
 
 ANNOTATION_KEYS = ["video_id", "person_id", "frame_number", "side", "annotator_id", "annotation_session"]
@@ -95,6 +96,10 @@ def save_reference_annotation(record: dict[str, object], path: str | Path) -> Pa
     try:
         handle.close()
         existing = read_reference_annotations(output) if output.exists() else pd.DataFrame()
+        if not existing.empty and (set(EXPERIMENT_KEYS).intersection(existing.columns) or
+                                   set(EXPERIMENT_KEYS).intersection(record)):
+            if experiment_values(existing) != experiment_values(pd.DataFrame([record])):
+                raise ValueError("Plik anotacji ma inne metadane eksperymentu.")
         if not existing.empty and (set(PROVENANCE_KEYS).intersection(existing.columns) or
                                    set(PROVENANCE_KEYS).intersection(record)):
             if recording_metadata(existing) != recording_metadata(pd.DataFrame([record])):

@@ -16,6 +16,7 @@ from .frame_quality import add_quality_columns
 from .knee_angle import add_pixel_angle_columns
 from .smoothing import smooth_series
 from .provenance import file_sha256, new_analysis_id, recording_metadata
+from .experiment_metadata import normalize_experiment_metadata
 
 
 SIDE_INDEXES = {
@@ -103,6 +104,7 @@ def process_video(
     smoothing_method: str = "median",
     smoothing_window: int = 5,
     analysis_id: str | None = None,
+    experiment_metadata: dict | None = None,
 ) -> ExtractionResult:
     """Extract selected-side hip, knee, ankle points and write canonical CSV data."""
     if side not in SIDE_INDEXES:
@@ -116,6 +118,10 @@ def process_video(
                   "resize_height": resize_height, "video_id": str(video_id).strip(),
                   "person_id": str(person_id).strip(), "side": side}
     provenance = recording_metadata(pd.DataFrame([provenance]))
+    study = normalize_experiment_metadata(
+        experiment_metadata or {"original_filename": Path(source).name}, provenance["person_id"], side)
+    if study["inclusion_status"] != "INCLUDED":
+        raise ValueError("Nagranie nie ma statusu INCLUDED; ekstrakcja badawcza została zablokowana.")
 
     options = vision.PoseLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path=str(model_path)),
@@ -169,6 +175,8 @@ def process_video(
         raise RuntimeError("The source video contains no readable frames")
     for key, value in provenance.items():
         data[key] = value
+    for key, value in study.items():
+        data[key] = value
     data = add_pixel_angle_columns(data)
     data["knee_angle_smoothed"] = smooth_series(
         data["knee_angle_raw"].to_numpy(), smoothing_method, smoothing_window
@@ -179,7 +187,7 @@ def process_video(
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("x", encoding="utf-8", newline="") as stream:
         data.to_csv(stream, index=False)
-    metadata = {**provenance, "source_name": Path(source).name,
+    metadata = {**provenance, **study, "source_name": Path(source).name,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "model_sha256": file_sha256(model_path), "model_name": Path(model_path).name,
                 "fps": fps, "frames": len(data),

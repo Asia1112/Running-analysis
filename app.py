@@ -32,6 +32,10 @@ from src.knee_angle_validation.validation import merge_with_reference
 from src.knee_angle_validation.provenance import (
     PROVENANCE_KEYS, file_sha256, new_analysis_id, recording_metadata, require_source_match,
 )
+from src.knee_angle_validation.experiment_metadata import (
+    DEFAULT_METADATA_PATH, EXPERIMENT_KEYS, experiment_values, load_video_metadata,
+    metadata_for_video, normalize_experiment_metadata,
+)
 
 
 DATA_DIR = Path("data")
@@ -50,6 +54,7 @@ def _initialize_state() -> None:
         "video_path": None, "crop_mode": "none", "side": "left",
         "annotation_drafts": {},
         "active_analysis_id": None, "source_sha256": None, "summary": None,
+        "input_video_id": "video_001", "input_side": "left",
         "annotation_session": f"session_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}",
     }
     for key, value in defaults.items():
@@ -152,33 +157,63 @@ def _extraction_view() -> None:
     """Render video metadata, controlled side selection, and extraction action."""
     st.subheader("Nagranie i ekstrakcja punktów")
     uploaded = st.file_uploader("Nagranie boczne jednej osoby", type=["mp4", "mov", "avi", "mkv"])
-    col1, col2, col3 = st.columns(3)
-    video_id = col1.text_input("Video ID", value="video_001", key="input_video_id")
-    person_id = col2.text_input("Person ID", value="person_001", key="input_person_id")
-    side = col3.segmented_control("Noga bliższa kamerze", ["left", "right"], default="left", key="input_side")
-    crop_mode = st.selectbox("Kadrowanie", ["none", "left", "right", "center"], key="input_crop")
     upload_token = (uploaded.file_id, uploaded.name, uploaded.size) if uploaded is not None else None
+    try:
+        table = load_video_metadata(DEFAULT_METADATA_PATH) if DEFAULT_METADATA_PATH.exists() else None
+        study = metadata_for_video(uploaded.name, table) if uploaded is not None and table is not None else None
+    except (ValueError, OSError) as error:
+        _reset_analysis()
+        st.error(f"Nie można wczytać metadanych: {error}")
+        return
+    form_context = (upload_token, tuple(study.items()) if study else None)
+    if st.session_state.get("metadata_form_context") != form_context:
+        _reset_analysis()
+        st.session_state.metadata_form_context = form_context
+        if uploaded is not None:
+            st.session_state.input_video_id = Path(uploaded.name).stem
+            st.session_state.input_person_id = study["person_id"] if study else ""
+            st.session_state.input_side = study["side"] if study else "left"
+            st.session_state.input_speed = study["speed_kmh"] if study else None
+    col1, col2, col3, col4 = st.columns(4)
+    video_id = col1.text_input("Video ID", key="input_video_id")
+    person_id = col2.text_input("Person ID", key="input_person_id", disabled=study is not None)
+    side = col3.segmented_control("Noga bliższa kamerze", ["left", "right"], key="input_side", disabled=study is not None)
+    speed = col4.number_input("Prędkość bieżni [km/h]", min_value=0.1, value=None, step=0.1,
+                              key="input_speed", disabled=study is not None)
+    if study:
+        st.caption(f"Metadane z tabeli: {study['original_filename']} · {person_id} · {speed:g} km/h · {side} · {study['inclusion_status']}")
+    elif uploaded is not None:
+        st.info("Brak nagrania w tabeli metadanych. Wpisz osobę i wybierz stronę; prędkość może pozostać nieznana.")
+    crop_mode = st.selectbox("Kadrowanie", ["none", "left", "right", "center"], key="input_crop")
     if st.session_state.get("uploaded_video_token") != upload_token:
         _reset_analysis()
         st.session_state.uploaded_video_token = upload_token
         path = _uploaded_path(uploaded) if uploaded is not None else None
         st.session_state.video_path = str(path) if path else None
         st.session_state.source_sha256 = path.stem if path else None
-    context = (st.session_state.source_sha256, video_id, person_id, side, crop_mode)
+    context = (st.session_state.source_sha256, video_id, person_id, side, crop_mode, speed,
+               tuple(study.items()) if study else None)
     if st.session_state.get("input_context") != context:
         _reset_analysis()
         st.session_state.input_context = context
     if uploaded is not None:
         st.video(st.session_state.video_path)
-    if st.button("Uruchom ekstrakcję", icon=":material/play_arrow:", disabled=uploaded is None):
+    excluded = study is not None and study["inclusion_status"] != "INCLUDED"
+    if excluded:
+        st.warning("Status nagrania nie pozwala na ekstrakcję badawczą. Sprawdź inclusion_status w tabeli.")
+    if st.button("Uruchom ekstrakcję", icon=":material/play_arrow:", disabled=uploaded is None or excluded):
         _reset_analysis()
         analysis_id = new_analysis_id()
         try:
+            experiment = normalize_experiment_metadata(study or {
+                "original_filename": uploaded.name, "speed_kmh": speed,
+            }, person_id, side)
             with st.spinner("Przetwarzanie klatek..."):
                 result = process_video(
                     st.session_state.video_path,
                     RESULTS_DIR / "analyses" / analysis_id / "extracted_landmarks.csv",
                     video_id, person_id, side, crop_mode=crop_mode, analysis_id=analysis_id,
+                    experiment_metadata=experiment,
                 )
             _activate_analysis(result.data)
             st.success(f"Przetworzono {result.frames} klatek; pozycję wykryto w {result.pose_found_pct:.1f}% klatek.")
@@ -192,6 +227,7 @@ def _extraction_view() -> None:
             try:
                 imported = pd.read_csv(uploaded_csv, dtype={"video_id": str, "person_id": str,
                                                            "analysis_id": str, "source_sha256": str})
+                experiment_values(imported)
                 _activate_analysis(imported)
                 folder = _analysis_directory()
                 folder.mkdir(parents=True, exist_ok=True)
@@ -504,8 +540,8 @@ def _statistics_view() -> None:
     validation["visibility_group"] = validation["min_visibility"].map(classify_visibility)
     summary = grouped_statistics(validation, ["video_id", "person_id", "visibility_group"])
     summary["angle_definition"] = "knee_flexion_2d_deg"
-    for key in (*PROVENANCE_KEYS, "annotator_id", "annotation_session", "side"):
-        if key in validation and validation[key].nunique() == 1:
+    for key in (*PROVENANCE_KEYS, *EXPERIMENT_KEYS, "annotator_id", "annotation_session", "side"):
+        if key in validation and validation[key].nunique(dropna=False) == 1:
             summary[key] = validation[key].iloc[0]
     st.session_state.summary = summary
     write_csv(summary, _analysis_directory() / "summary_statistics.csv")

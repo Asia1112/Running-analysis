@@ -8,6 +8,7 @@ from src.knee_angle_validation.annotation_storage import read_reference_annotati
 from src.knee_angle_validation.statistics import grouped_statistics
 from src.knee_angle_validation.validation import merge_with_reference
 from src.knee_angle_validation.provenance import recording_metadata, new_analysis_id
+from src.knee_angle_validation.experiment_metadata import experiment_values
 
 
 def main() -> None:
@@ -35,6 +36,10 @@ def main() -> None:
     metadata = recording_metadata(extracted)
     if metadata:
         for key, value in metadata.items():
+            summary[key] = value
+    study = experiment_values(extracted)
+    if study:
+        for key, value in study.items():
             summary[key] = value
     analysis_id = metadata["analysis_id"] if metadata else new_analysis_id()
     folder = Path("data/results/analyses") / analysis_id / "validations" / new_analysis_id()

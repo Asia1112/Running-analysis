@@ -40,7 +40,9 @@ class PixelExtractionTests(unittest.TestCase):
                      warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
                     result = process_video(source, output, 'v1', 'p1', side,
-                                           model_path=model, resize_height=0)
+                                           model_path=model, resize_height=0, experiment_metadata={
+                                               'original_filename': 'IMG_1302.MOV', 'speed_kmh': 7.5,
+                                               'metadata_table_sha256': 'c' * 64, 'metadata_notes': 'pilot'})
                 saved = pd.read_csv(output)
                 metadata = json.loads(output.with_suffix('.metadata.json').read_text(encoding='utf-8'))
                 self.assertEqual(metadata['analysis_id'], saved.analysis_id.iloc[0])
@@ -48,6 +50,9 @@ class PixelExtractionTests(unittest.TestCase):
                 self.assertEqual(metadata['crop_mode'], 'none')
                 self.assertEqual(metadata['resize_height'], 0)
                 self.assertEqual(metadata['frames'], 2)
+                self.assertEqual(metadata['original_filename'], 'IMG_1302.MOV')
+                self.assertEqual(metadata['speed_kmh'], 7.5)
+                self.assertTrue(saved.speed_kmh.eq(7.5).all())
                 self.assertEqual(len(metadata['model_sha256']), 64)
                 self.assertAlmostEqual(saved.loc[0, "knee_internal_angle_deg"], 90.)
                 self.assertAlmostEqual(saved.loc[0, "knee_flexion_deg"], 90.)
@@ -57,6 +62,8 @@ class PixelExtractionTests(unittest.TestCase):
                 merged = merge_with_reference(result.data, pd.DataFrame([reference]))
                 self.assertAlmostEqual(merged.loc[0, "error_signed"], 0.)
                 self.assertAlmostEqual(merged.loc[0, "error_internal_signed"], 0.)
+                self.assertEqual(reference['speed_kmh'], 7.5)
+                self.assertEqual(merged.speed_kmh.tolist(), [7.5])
                 before = output.read_bytes()
                 with self.assertRaisesRegex(ValueError, "Wyniki już istnieją"):
                     process_video(source, output, 'v1', 'p1', side, model_path=model)
