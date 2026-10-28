@@ -172,6 +172,48 @@ i orientacji obrazu — te kwestie wymagają osobnej weryfikacji.
 
 ## Format danych CSV
 
+### Wybór fragmentu 20 s
+
+Przed ekstrakcją ustaw „Początek analizy w filmie” i „Koniec analizy w filmie”.
+Domyślny zakres to **0–20 s**; dla właściwej próby wybierz wcześniej ustalony
+fragment stabilnego biegu, np. **5–25 s**. Dla krótszego pilotażu można podać
+inny zakres. Zmiana granic unieważnia poprzedni stan; nowa ekstrakcja tworzy
+nowy `analysis_id` i zachowuje wcześniejsze pliki.
+
+Zakres jest półotwarty `[początek, koniec)`: klatka o czasie równym końcowi
+nie jest analizowana. Przy 60 FPS zakres 5–25 s zawiera 1200 klatek o numerach
+300–1499. `frame_number` zaczyna się od 0 w pełnym filmie i nigdy nie jest
+przenumerowywany po wybraniu fragmentu; `time_s` i znaczniki MediaPipe nadal
+odnoszą się do pełnego nagrania. Model otrzymuje wyłącznie klatki z zakresu;
+klatki przed początkiem są odczytywane sekwencyjnie bez detekcji, aby zachować
+źródłowe indeksy. Wygładzanie i ocena jakości dotyczą wybranego odcinka.
+
+`analysis_start_s` i `analysis_end_s` są zapisywane w punktach, wyborze klatek,
+anotacjach, wynikach, statystykach i manifeście JSON. Walidacja wymaga zgodności
+zakresu między nowymi punktami i referencją. Wybór 30 klatek działa na tym
+fragmencie, z zachowaniem źródłowych numerów i czasów. Anotacja czyta wskazaną
+klatkę pełnego filmu; eksport MP4 obejmuje tylko analizowany fragment i nadal
+wyświetla źródłowy numer klatki na nakładce.
+
+Zakres pusty, odwrócony, ujemny lub niekompletny (np. 20 s z filmu krótszego
+niż 20 s) jest odrzucany bez zapisu częściowego CSV. W takim przypadku ustaw
+krótszy, prawidłowy zakres. Niepoprawne FPS również zatrzymuje ekstrakcję;
+nie podstawiamy już domyślnego 30 FPS. Czas nadal pochodzi z nominalnego FPS
+OpenCV (`frame_number / fps`); to **nie rozwiązuje obsługi rzeczywistych
+znaczników VFR**. Kwestia VFR i orientacji nagrań wymaga osobnego sprawdzenia.
+
+W CLI `--start` wskazuje początek, a `--end` wyłączony koniec. Bez `--end`
+koniec wynosi `--start + 20 s`:
+
+```powershell
+.\.venv\Scripts\python.exe pose_video.py --source data\raw\IMG_1302.MOV --start 5 --end 25
+```
+
+Niskopoziomowe `process_video()` zachowuje zgodność ze starszym wywołaniem:
+domyślne `end_time_s=None` oznacza odczyt do końca filmu. Interfejs i CLI
+przekazują granice jawnie. Starsze CSV bez pól zakresu nie są automatycznie
+przycinane; nową próbę przygotuj przez ponowną ekstrakcję.
+
 ### Metadane eksperymentu
 
 Tabela `data/metadata/videos_metadata.csv` jest odczytywana z separatorem `;`.

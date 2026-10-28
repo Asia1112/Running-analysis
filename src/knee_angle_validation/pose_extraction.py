@@ -15,7 +15,7 @@ from mediapipe.tasks.python import vision
 from .frame_quality import add_quality_columns
 from .knee_angle import add_pixel_angle_columns
 from .smoothing import smooth_series
-from .provenance import file_sha256, new_analysis_id, recording_metadata
+from .provenance import file_sha256, new_analysis_id, recording_metadata, validate_time_range, frame_limits
 from .experiment_metadata import normalize_experiment_metadata
 
 
@@ -105,10 +105,13 @@ def process_video(
     smoothing_window: int = 5,
     analysis_id: str | None = None,
     experiment_metadata: dict | None = None,
+    start_time_s: float = 0.0,
+    end_time_s: float | None = None,
 ) -> ExtractionResult:
     """Extract selected-side hip, knee, ankle points and write canonical CSV data."""
     if side not in SIDE_INDEXES:
         raise ValueError("side must be 'left' or 'right'")
+    start_time_s, end_time_s = validate_time_range(start_time_s, end_time_s)
     if not Path(model_path).exists():
         raise FileNotFoundError(f"MediaPipe model not found: {model_path}")
     if Path(output_csv).exists() or Path(output_csv).with_suffix(".metadata.json").exists():
@@ -132,18 +135,28 @@ def process_video(
     if not capture.isOpened():
         raise RuntimeError(f"Cannot open source video: {source}")
     fps = float(capture.get(cv2.CAP_PROP_FPS))
-    if fps <= 0:
-        fps = 30.0
+    try:
+        first_frame, stop_frame = frame_limits(start_time_s, end_time_s, fps)
+    except ValueError:
+        capture.release()
+        raise
 
     rows: list[dict[str, object]] = []
     indexes = SIDE_INDEXES[side]
-    landmarker = vision.PoseLandmarker.create_from_options(options)
+    landmarker = None
     try:
+        landmarker = vision.PoseLandmarker.create_from_options(options)
         frame_number = 0
-        while True:
+        while stop_frame is None or frame_number < stop_frame:
             ok, original = capture.read()
             if not ok:
+                if end_time_s is not None and frame_number / fps < end_time_s - 1e-9:
+                    raise ValueError(f"Nagranie kończy się lub nie można go odczytać przy {frame_number / fps:.6f} s; "
+                                     "wybrany fragment nie jest kompletny. Skróć zakres analizy.")
                 break
+            if frame_number < first_frame:
+                frame_number += 1
+                continue
             frame = resize_frame(crop_frame(original, crop_mode), resize_height)
             height, width = frame.shape[:2]
             timestamp_ms = round(frame_number / fps * 1000)
@@ -168,11 +181,14 @@ def process_video(
             frame_number += 1
     finally:
         capture.release()
-        landmarker.close()
+        if landmarker is not None:
+            landmarker.close()
 
     data = pd.DataFrame(rows)
     if data.empty:
-        raise RuntimeError("The source video contains no readable frames")
+        raise ValueError("Wybrany zakres nie zawiera czytelnych klatek nagrania.")
+    provenance.update(analysis_start_s=start_time_s,
+                      analysis_end_s=end_time_s if end_time_s is not None else frame_number / fps)
     for key, value in provenance.items():
         data[key] = value
     for key, value in study.items():

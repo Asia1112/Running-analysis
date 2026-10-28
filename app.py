@@ -30,7 +30,7 @@ from src.knee_angle_validation.smoothing import smooth_series
 from src.knee_angle_validation.statistics import grouped_statistics, visibility_correlations
 from src.knee_angle_validation.validation import merge_with_reference
 from src.knee_angle_validation.provenance import (
-    PROVENANCE_KEYS, file_sha256, new_analysis_id, recording_metadata, require_source_match,
+    PROVENANCE_KEYS, RANGE_KEYS, file_sha256, new_analysis_id, recording_metadata, require_source_match,
 )
 from src.knee_angle_validation.experiment_metadata import (
     DEFAULT_METADATA_PATH, EXPERIMENT_KEYS, experiment_values, load_video_metadata,
@@ -174,6 +174,8 @@ def _extraction_view() -> None:
             st.session_state.input_person_id = study["person_id"] if study else ""
             st.session_state.input_side = study["side"] if study else "left"
             st.session_state.input_speed = study["speed_kmh"] if study else None
+            st.session_state.pop("input_start_s", None)
+            st.session_state.pop("input_end_s", None)
     col1, col2, col3, col4 = st.columns(4)
     video_id = col1.text_input("Video ID", key="input_video_id")
     person_id = col2.text_input("Person ID", key="input_person_id", disabled=study is not None)
@@ -185,13 +187,20 @@ def _extraction_view() -> None:
     elif uploaded is not None:
         st.info("Brak nagrania w tabeli metadanych. Wpisz osobę i wybierz stronę; prędkość może pozostać nieznana.")
     crop_mode = st.selectbox("Kadrowanie", ["none", "left", "right", "center"], key="input_crop")
+    range_left, range_right = st.columns(2)
+    start = range_left.number_input("Początek analizy w filmie [s]", min_value=0.0, value=0.0,
+                                    step=1.0, format="%.3f", key="input_start_s")
+    end = range_right.number_input("Koniec analizy w filmie [s]", min_value=0.001, value=20.0,
+                                  step=1.0, format="%.3f", key="input_end_s")
+    st.caption(f"Fragment: {end - start:.3f} s. Domyślnie 20 s. Koniec zakresu jest wyłączony; "
+               "numery klatek i czas pozostają względem pełnego nagrania. Ustaw zakres przed ekstrakcją.")
     if st.session_state.get("uploaded_video_token") != upload_token:
         _reset_analysis()
         st.session_state.uploaded_video_token = upload_token
         path = _uploaded_path(uploaded) if uploaded is not None else None
         st.session_state.video_path = str(path) if path else None
         st.session_state.source_sha256 = path.stem if path else None
-    context = (st.session_state.source_sha256, video_id, person_id, side, crop_mode, speed,
+    context = (st.session_state.source_sha256, video_id, person_id, side, crop_mode, speed, start, end,
                tuple(study.items()) if study else None)
     if st.session_state.get("input_context") != context:
         _reset_analysis()
@@ -214,6 +223,7 @@ def _extraction_view() -> None:
                     RESULTS_DIR / "analyses" / analysis_id / "extracted_landmarks.csv",
                     video_id, person_id, side, crop_mode=crop_mode, analysis_id=analysis_id,
                     experiment_metadata=experiment,
+                    start_time_s=start, end_time_s=end,
                 )
             _activate_analysis(result.data)
             st.success(f"Przetworzono {result.frames} klatek; pozycję wykryto w {result.pose_found_pct:.1f}% klatek.")
@@ -245,6 +255,10 @@ def _extraction_view() -> None:
         st.session_state.pop("loaded_extracted_csv_signature", None)
     if st.session_state.extracted is not None:
         st.caption(f"Katalog bieżącej analizy: {_analysis_directory()}")
+        active = recording_metadata(st.session_state.extracted)
+        if active and set(RANGE_KEYS).issubset(active):
+            st.caption(f"Zakres zapisanej analizy: [{active['analysis_start_s']:.3f}, {active['analysis_end_s']:.3f}) s. "
+                       "Pola powyżej służą do nowej ekstrakcji.")
         try:
             _verified_geometry(st.session_state.extracted)
         except ValueError as error:
@@ -438,7 +452,7 @@ def _annotation_view() -> None:
     selected_row = selected.loc[selected["frame_number"] == frame_number].iloc[0]
     try:
         identity = annotation_identity(selected_row, annotator_id, session_id)
-        identity.update({key: metadata[key] for key in PROVENANCE_KEYS})
+        identity.update({key: metadata[key] for key in (*PROVENANCE_KEYS, *RANGE_KEYS) if key in metadata})
         frame = read_analysis_frame(video_path, frame_number, metadata["crop_mode"], metadata["resize_height"])
         if (frame.shape[1], frame.shape[0]) != (int(selected_row["image_width"]), int(selected_row["image_height"])):
             raise ValueError("Wymiary obrazu nie odpowiadają klatce ekstrakcji.")
@@ -540,7 +554,7 @@ def _statistics_view() -> None:
     validation["visibility_group"] = validation["min_visibility"].map(classify_visibility)
     summary = grouped_statistics(validation, ["video_id", "person_id", "visibility_group"])
     summary["angle_definition"] = "knee_flexion_2d_deg"
-    for key in (*PROVENANCE_KEYS, *EXPERIMENT_KEYS, "annotator_id", "annotation_session", "side"):
+    for key in (*PROVENANCE_KEYS, *RANGE_KEYS, *EXPERIMENT_KEYS, "annotator_id", "annotation_session", "side"):
         if key in validation and validation[key].nunique(dropna=False) == 1:
             summary[key] = validation[key].iloc[0]
     st.session_state.summary = summary

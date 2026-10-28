@@ -8,7 +8,7 @@ from tempfile import NamedTemporaryFile
 
 import numpy as np
 import pandas as pd
-from .provenance import PROVENANCE_KEYS, recording_metadata
+from .provenance import PROVENANCE_KEYS, RANGE_KEYS, recording_metadata
 from .experiment_metadata import EXPERIMENT_KEYS, experiment_values
 
 
@@ -35,7 +35,7 @@ def annotation_identity(frame: object, annotator_id: str, session: str) -> dict[
 
 def annotation_widget_key(identity: dict[str, object], image_sha256: str) -> str:
     """Keep drafts separate by all identity fields and the exact displayed image."""
-    payload = [identity[key] for key in ANNOTATION_KEYS] + [identity.get(key) for key in PROVENANCE_KEYS] + [image_sha256]
+    payload = [identity[key] for key in ANNOTATION_KEYS] + [identity.get(key) for key in (*PROVENANCE_KEYS, *RANGE_KEYS)] + [image_sha256]
     return "annotation_" + hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
 
 

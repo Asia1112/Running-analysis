@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from src.knee_angle_validation.overlay import draw_overlay, export_overlay_video, validate_overlay_data
+from src.knee_angle_validation.provenance import file_sha256
 
 
 def measurements(count=4):
@@ -20,6 +21,39 @@ def measurements(count=4):
 
 
 class OverlayTests(unittest.TestCase):
+    def test_interval_export_uses_source_frames_instead_of_starting_at_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.avi'
+            writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*'MJPG'), 30, (160, 160))
+            self.assertTrue(writer.isOpened())
+            for i in range(8):
+                frame = np.zeros((160, 160, 3), dtype=np.uint8)
+                frame[120:140, 0:20, 0] = 20 + 20 * i
+                writer.write(frame)
+            writer.release()
+            rows = measurements(8).iloc[2:6].copy()
+            for key, value in dict(analysis_id='a' * 32, source_sha256=file_sha256(source),
+                                   crop_mode='none', resize_height=0,
+                                   analysis_start_s=2/30, analysis_end_s=6/30).items():
+                rows[key] = value
+            target = Path(directory) / 'segment.mp4'
+            export_overlay_video(source, rows, target, resize_height=0)
+            capture = cv2.VideoCapture(str(target))
+            values = []
+            try:
+                while True:
+                    ok, frame = capture.read()
+                    if not ok:
+                        break
+                    values.append(float(frame[124:136, 4:16, 0].mean()))
+            finally:
+                capture.release()
+            self.assertEqual(len(values), 4)
+            self.assertAlmostEqual(values[0], 60, delta=15)
+            self.assertAlmostEqual(values[-1], 120, delta=15)
+            with self.assertRaises(ValueError):
+                export_overlay_video(source, rows.iloc[1:], Path(directory) / 'missing.mp4', resize_height=0)
+
     def test_points_use_pixel_positions_without_mutating_source(self):
         frame = np.zeros((160, 160, 3), dtype=np.uint8)
         result = draw_overlay(frame, measurements().iloc[0])

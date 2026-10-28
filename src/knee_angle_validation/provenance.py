@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+import math
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,6 +10,23 @@ import pandas as pd
 
 
 PROVENANCE_KEYS = ("analysis_id", "source_sha256", "crop_mode", "resize_height")
+RANGE_KEYS = ("analysis_start_s", "analysis_end_s")
+
+
+def validate_time_range(start: float, end: float | None) -> tuple[float, float | None]:
+    start = float(start)
+    end = float(end) if end is not None else None
+    if not math.isfinite(start) or start < 0 or (end is not None and (not math.isfinite(end) or end <= start)):
+        raise ValueError("Zakres analizy wymaga 0 ≤ początek < koniec oraz skończonych czasów.")
+    return start, end
+
+
+def frame_limits(start: float, end: float | None, fps: float) -> tuple[int, int | None]:
+    """Half-open interval [start, end), using the source frame's nominal time."""
+    start, end = validate_time_range(start, end)
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError("Nieprawidłowe FPS; nie można wyznaczyć czasu klatek.")
+    return math.ceil(start * fps - 1e-9), math.ceil(end * fps - 1e-9) if end is not None else None
 
 
 def new_analysis_id() -> str:
@@ -51,6 +69,14 @@ def recording_metadata(data: pd.DataFrame) -> dict | None:
         result[key] = str(result[key])
     if result["side"] not in ("left", "right"):
         raise ValueError("Nieprawidłowa strona ciała w metadanych.")
+    if set(RANGE_KEYS).intersection(data.columns):
+        if not set(RANGE_KEYS).issubset(data.columns):
+            raise ValueError("Niekompletny zakres analizy w CSV.")
+        for key in RANGE_KEYS:
+            if data[key].isna().any() or data[key].nunique() != 1:
+                raise ValueError(f"Analiza wymaga jednej wartości {key}.")
+        start, end = validate_time_range(data.analysis_start_s.iloc[0], data.analysis_end_s.iloc[0])
+        result.update(analysis_start_s=start, analysis_end_s=end)
     return result
 
 

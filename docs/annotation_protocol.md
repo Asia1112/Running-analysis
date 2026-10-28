@@ -44,6 +44,9 @@ knee_flexion_deg = 180.0 - theta_deg
 ## 4. Wybór 30 klatek na nagranie
 
 1. Wybierz wcześniej zdefiniowany odcinek stabilnego biegu.
+   Dla próby głównej ustaw 20 s przed ekstrakcją (np. 5–25 s). Zakres jest
+   półotwarty `[początek, koniec)` i zapisany jako `analysis_start_s` oraz
+   `analysis_end_s`. Numery klatek i czas pozostają względem pełnego filmu.
 2. Zastosuj **30 z góry określonych znaczników czasu** równomiernie rozłożonych w tym odcinku (np. środki 30 równych przedziałów).
 3. Dla każdego znacznika wybierz najbliższą rzeczywistą klatkę i zapisz `frame_index` oraz `timestamp_s`; pilnuj, by nie wybierać dwa razy tej samej klatki.
 4. Nie wybieraj klatek na podstawie tego, czy MediaPipe poprawnie wykrył punkty — to mogłoby sztucznie poprawić ocenę algorytmu.

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .pose_extraction import crop_frame, resize_frame
-from .provenance import PROVENANCE_KEYS, require_source_match, file_sha256
+from .provenance import PROVENANCE_KEYS, RANGE_KEYS, require_source_match, file_sha256, frame_limits
 
 
 POINTS = {"hip": ((255, 160, 60), "Biodro"),
@@ -79,12 +79,16 @@ def export_overlay_video(source: str | Path, data: pd.DataFrame, output: str | P
                          crop_mode: str = "none", resize_height: int = 720) -> Path:
     """Export a silent H.264 CFR preview; preserve source frame order and FPS."""
     rows = validate_overlay_data(data)
+    interval = None
     if set(PROVENANCE_KEYS).intersection(rows.columns):
         metadata = require_source_match(rows, file_sha256(source))
         if crop_mode != metadata["crop_mode"] or resize_height != metadata["resize_height"]:
             raise ValueError("Kadrowanie i skalowanie muszą odpowiadać metadanym ekstrakcji.")
-    if not np.array_equal(rows["frame_number"].to_numpy(), np.arange(len(rows))):
-        raise ValueError("Eksport filmu wymaga pełnej ekstrakcji od klatki 0, bez luk.")
+        if set(RANGE_KEYS).issubset(metadata):
+            interval = frame_limits(metadata["analysis_start_s"], metadata["analysis_end_s"], float(rows.fps.iloc[0]))
+    expected = np.arange(*interval) if interval else np.arange(len(rows))
+    if not np.array_equal(rows["frame_number"].to_numpy(), expected):
+        raise ValueError("Eksport wymaga wszystkich kolejnych klatek wybranego zakresu, bez luk.")
     output = Path(output)
     if output.exists():
         raise FileExistsError(f"Plik już istnieje: {output}")
@@ -99,6 +103,9 @@ def export_overlay_video(source: str | Path, data: pd.DataFrame, output: str | P
         source_fps = capture.get(cv2.CAP_PROP_FPS)
         if not np.isfinite(source_fps) or not np.isclose(source_fps, fps, rtol=0.001):
             raise ValueError("FPS filmu nie zgadza się z ekstrakcją.")
+        for _ in range(int(rows.frame_number.iloc[0])):
+            if not capture.read()[0]:
+                raise ValueError("Film kończy się przed początkiem wybranego fragmentu.")
         for _, row in rows.iterrows():
             ok, frame = capture.read()
             if not ok:
@@ -120,7 +127,7 @@ def export_overlay_video(source: str | Path, data: pd.DataFrame, output: str | P
                 )
                 writer.send(None)
             writer.send(np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
-        if capture.read()[0]:
+        if interval is None and capture.read()[0]:
             raise ValueError("Film ma więcej klatek niż ekstrakcja. Sprawdź zgodność danych.")
         writer.close()
         writer = None

@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from src.knee_angle_validation.pose_extraction import process_video
-from src.knee_angle_validation.provenance import new_analysis_id
+from src.knee_angle_validation.provenance import new_analysis_id, validate_time_range
 from src.knee_angle_validation.experiment_metadata import (
     DEFAULT_METADATA_PATH, load_video_metadata, metadata_for_video, normalize_experiment_metadata,
 )
@@ -23,9 +23,12 @@ def main() -> None:
     parser.add_argument("--original-filename", help="Original filename if --source is a hash-named copy")
     parser.add_argument("--crop", choices=["none", "left", "right", "center"], default="none")
     parser.add_argument("--model", default="models/pose_landmarker_full.task")
+    parser.add_argument("--start", type=float, default=0.0, help="Start time in the full source video, seconds")
+    parser.add_argument("--end", type=float, help="Exclusive end time; defaults to --start plus 20 seconds")
     args = parser.parse_args()
     original = args.original_filename or Path(args.source).name
     try:
+        start, end = validate_time_range(args.start, args.end if args.end is not None else args.start + 20.0)
         study = metadata_for_video(original, load_video_metadata(args.metadata))
         person = args.person_id if args.person_id is not None else (study["person_id"] if study else "")
         side = args.side if args.side is not None else (study["side"] if study else "")
@@ -41,6 +44,7 @@ def main() -> None:
         args.source, args.csv or Path("data/results/analyses") / analysis_id / "extracted_landmarks.csv",
         args.video_id or Path(original).stem, person, side,
         model_path=args.model, crop_mode=args.crop, analysis_id=analysis_id, experiment_metadata=experiment,
+        start_time_s=start, end_time_s=end,
     )
     print(f"Saved {result.frames} frames to {Path(result.csv_path)}")
     print(f"Pose found: {result.pose_found_pct:.1f}%")
