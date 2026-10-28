@@ -12,7 +12,7 @@ from mediapipe.tasks.python import vision
 
 from .frame_quality import add_quality_columns
 from .io_utils import write_csv
-from .knee_angle import calculate_knee_angle
+from .knee_angle import add_pixel_angle_columns
 from .smoothing import smooth_series
 
 
@@ -145,15 +145,9 @@ def process_video(
             if landmarks is None:
                 for point in indexes:
                     row.update(_empty_point_record(point))
-                row["knee_angle_raw"] = np.nan
             else:
                 for point, index in indexes.items():
                     row.update(_point_record(point, landmarks[index], width, height))
-                row["knee_angle_raw"] = calculate_knee_angle(
-                    (row["hip_x_norm"], row["hip_y_norm"]),
-                    (row["knee_x_norm"], row["knee_y_norm"]),
-                    (row["ankle_x_norm"], row["ankle_y_norm"]),
-                )
             rows.append(row)
             frame_number += 1
     finally:
@@ -163,9 +157,11 @@ def process_video(
     data = pd.DataFrame(rows)
     if data.empty:
         raise RuntimeError("The source video contains no readable frames")
+    data = add_pixel_angle_columns(data)
     data["knee_angle_smoothed"] = smooth_series(
         data["knee_angle_raw"].to_numpy(), smoothing_method, smoothing_window
     )
+    data["knee_flexion_smoothed_deg"] = 180.0 - data["knee_angle_smoothed"]
     data = add_quality_columns(data)
     csv_path = write_csv(data, output_csv)
     return ExtractionResult(

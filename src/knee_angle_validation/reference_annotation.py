@@ -13,6 +13,7 @@ REFERENCE_COLUMNS = [
     "video_id", "person_id", "frame_number", "side", "annotator_id",
     "annotation_session", "hip_x_ref", "hip_y_ref", "knee_x_ref", "knee_y_ref",
     "ankle_x_ref", "ankle_y_ref", "knee_angle_reference", "notes",
+    "knee_internal_angle_deg", "knee_flexion_deg", "angle_geometry",
 ]
 
 
@@ -59,6 +60,7 @@ def build_reference_annotation(
     if len(points) != 3:
         raise ValueError("Exactly three points are required: hip, knee, ankle")
     hip, knee, ankle = points
+    internal = calculate_knee_angle(hip, knee, ankle)
     return {
         "video_id": frame["video_id"], "person_id": frame["person_id"],
         "frame_number": int(frame["frame_number"]), "side": frame["side"],
@@ -66,5 +68,7 @@ def build_reference_annotation(
         "hip_x_ref": hip[0], "hip_y_ref": hip[1],
         "knee_x_ref": knee[0], "knee_y_ref": knee[1],
         "ankle_x_ref": ankle[0], "ankle_y_ref": ankle[1],
-        "knee_angle_reference": calculate_knee_angle(hip, knee, ankle), "notes": notes,
+        "knee_angle_reference": internal, "notes": notes,
+        "knee_internal_angle_deg": internal, "knee_flexion_deg": 180.0 - internal,
+        "angle_geometry": "pixel_2d_v1",
     }

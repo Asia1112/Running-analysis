@@ -3,6 +3,8 @@
 import numpy as np
 import pandas as pd
 
+from .knee_angle import add_pixel_angle_columns
+
 
 JOIN_KEYS = ["video_id", "person_id", "frame_number", "side"]
 
@@ -20,9 +22,18 @@ def merge_with_reference(extracted: pd.DataFrame, reference: pd.DataFrame) -> pd
     missing = [key for key in JOIN_KEYS if key not in extracted or key not in reference]
     if missing:
         raise ValueError(f"Missing join keys: {', '.join(missing)}")
-    merged = extracted.merge(reference, on=JOIN_KEYS, how="inner", validate="many_to_many")
-    merged["angle_mediapipe"] = merged["knee_angle_raw"]
-    merged["error_signed"] = merged["angle_mediapipe"] - merged["knee_angle_reference"]
+    # Always derive both methods from pixels, including older CSV inputs.
+    extracted = add_pixel_angle_columns(extracted)
+    reference = add_pixel_angle_columns(reference, reference=True)
+    merged = extracted.merge(reference, on=JOIN_KEYS, how="inner", validate="many_to_many",
+                             suffixes=("_mediapipe", "_reference"))
+    merged["angle_mediapipe"] = merged["knee_flexion_deg_mediapipe"]
+    merged["angle_reference"] = merged["knee_flexion_deg_reference"]
+    merged["angle_definition"] = "knee_flexion_2d_deg"
+    merged["error_signed"] = merged["angle_mediapipe"] - merged["angle_reference"]
+    merged["error_internal_signed"] = (
+        merged["knee_internal_angle_deg_mediapipe"] - merged["knee_internal_angle_deg_reference"]
+    )
     merged["error_absolute"] = merged["error_signed"].abs()
     merged["squared_error"] = merged["error_signed"].pow(2)
     for point in ("hip", "knee", "ankle"):

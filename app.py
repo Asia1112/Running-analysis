@@ -1,8 +1,10 @@
 """Streamlit research workspace for side-view knee-angle validation."""
 
 import base64
+import hashlib
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import altair as alt
 import cv2
@@ -11,9 +13,11 @@ import pandas as pd
 import streamlit as st
 
 from src.knee_angle_validation.annotation_component import annotate_image
-from src.knee_angle_validation.frame_quality import classify_visibility, detect_angle_jumps
+from src.knee_angle_validation.frame_quality import add_quality_columns, classify_visibility, detect_angle_jumps
+from src.knee_angle_validation.knee_angle import add_pixel_angle_columns
 from src.knee_angle_validation.io_utils import read_csv, write_csv
 from src.knee_angle_validation.pose_extraction import process_video, read_analysis_frame
+from src.knee_angle_validation.overlay import draw_overlay, export_overlay_video, validate_overlay_data
 from src.knee_angle_validation.reference_annotation import (
     REFERENCE_COLUMNS,
     build_reference_annotation,
@@ -70,20 +74,20 @@ def _download_csv(label: str, data: pd.DataFrame | None, filename: str) -> None:
 
 def _angle_chart(data: pd.DataFrame) -> None:
     """Render raw and smoothed knee-angle series with suspicious frames."""
-    chart = data[["time_s", "knee_angle_raw", "knee_angle_smoothed", "frame_quality_status"]].melt(
+    chart = data[["time_s", "knee_flexion_deg", "knee_flexion_smoothed_deg", "frame_quality_status"]].melt(
         id_vars=["time_s", "frame_quality_status"],
-        value_vars=["knee_angle_raw", "knee_angle_smoothed"],
+        value_vars=["knee_flexion_deg", "knee_flexion_smoothed_deg"],
         var_name="series", value_name="angle_deg",
     )
     lines = alt.Chart(chart).mark_line().encode(
-        x=alt.X("time_s:Q", title="Czas [s]"), y=alt.Y("angle_deg:Q", title="Kąt kolana [°]"),
+        x=alt.X("time_s:Q", title="Czas [s]"), y=alt.Y("angle_deg:Q", title="Zgięcie kolana 2D [°]"),
         color=alt.Color("series:N", title="Sygnał"),
         strokeDash=alt.StrokeDash("series:N"),
         tooltip=[alt.Tooltip("time_s:Q", format=".3f"), alt.Tooltip("angle_deg:Q", format=".2f")],
     )
     suspicious = data[data["frame_quality_status"] != "reliable"]
     points = alt.Chart(suspicious).mark_point(color="#e45756", filled=True, size=55).encode(
-        x="time_s:Q", y="knee_angle_raw:Q",
+        x="time_s:Q", y="knee_flexion_deg:Q",
         tooltip=["frame_number:Q", "frame_quality_status:N", "suspicious_reason:N"],
     )
     st.altair_chart((lines + points).interactive())
@@ -124,13 +128,17 @@ def _angle_view(data: pd.DataFrame | None) -> None:
     if data is None:
         st.info("Najpierw wykonaj lub wczytaj ekstrakcję.")
         return
+    st.caption("Zgięcie 2D = 180° − kąt wewnętrzny. Wyprost: 0°. Obliczenia ze współrzędnych pikselowych.")
     method = st.segmented_control("Wygładzanie", ["median", "moving_average", "savgol"], default="median")
     window = st.number_input("Okno", min_value=3, max_value=21, value=5, step=2)
     data["knee_angle_smoothed"] = smooth_series(data["knee_angle_raw"].to_numpy(), method, int(window))
+    data["knee_flexion_smoothed_deg"] = 180.0 - data["knee_angle_smoothed"]
+    updated = add_quality_columns(data)
+    data[updated.columns] = updated
     _angle_chart(data)
     comparison = []
     for candidate in ("median", "moving_average", "savgol"):
-        values = smooth_series(data["knee_angle_raw"].to_numpy(), candidate, int(window))
+        values = 180.0 - smooth_series(data["knee_angle_raw"].to_numpy(), candidate, int(window))
         comparison.append({
             "method": candidate,
             "jumps_10": int(detect_angle_jumps(values, 10).sum()),
@@ -159,6 +167,69 @@ def _quality_view(data: pd.DataFrame | None) -> None:
         "frame_number", "time_s", "min_visibility", "angle_jump_deg",
         "point_stability_error", "frame_quality_status", "suspicious_reason",
     ]], hide_index=True)
+
+
+def _overlay_view(data: pd.DataFrame | None) -> None:
+    """Inspect selected-leg points on demand, independently of manual annotation."""
+    st.subheader("Podgląd punktów na nagraniu")
+    st.caption("Biodro, kolano i kostka wybranej nogi. Nakładka korzysta z zapisanych punktów MediaPipe.")
+    source = st.session_state.video_path
+    if data is None or data.empty or not source or not Path(source).exists():
+        st.info("Wgraj film i wykonaj ekstrakcję albo wczytaj odpowiadający mu CSV.")
+        return
+    if not st.checkbox("Pokaż punkty na filmie", key="show_overlay"):
+        return
+    try:
+        rows = validate_overlay_data(data)
+    except (ValueError, TypeError) as error:
+        st.error(str(error))
+        return
+    # CSV from outside this session does not contain crop/source provenance.
+    crop = st.selectbox("Kadrowanie użyte podczas ekstrakcji", ["none", "left", "right", "center"],
+                        index=["none", "left", "right", "center"].index(st.session_state.crop_mode),
+                        key="overlay_crop")
+    st.caption("Dla wczytanego CSV ustaw takie samo kadrowanie jak przy ekstrakcji. "
+               "Zgodne wymiary i FPS nie gwarantują, że wybrano właściwy film.")
+    frame_numbers = rows["frame_number"].tolist()
+    frame_number = st.select_slider("Numer klatki (od 0)", options=frame_numbers, key="overlay_frame")
+    row = rows.loc[rows["frame_number"] == frame_number].iloc[0]
+    try:
+        frame = read_analysis_frame(source, frame_number, crop)
+        st.image(draw_overlay(frame, row), channels="BGR")
+    except (ValueError, RuntimeError, cv2.error) as error:
+        st.error(str(error))
+        return
+    st.caption("Niebieski: biodro · pomarańczowy: kolano · zielony: kostka. "
+               "Brakujące punkty i punkty poza kadrem nie są dorysowywane.")
+    st.dataframe(pd.DataFrame([
+        {"punkt": point, "x_px": row[f"{point}_x_px"], "y_px": row[f"{point}_y_px"],
+         "visibility": row.get(f"{point}_visibility", np.nan)}
+        for point in ("hip", "knee", "ankle")
+    ]), hide_index=True)
+    st.write(f"Status klatki: {row.get('frame_quality_status', 'brak')}")
+    if pd.notna(row.get("suspicious_reason")):
+        st.write(f"Powód oznaczenia: {row['suspicious_reason']}")
+    signature_data = rows.drop(columns=["knee_angle_smoothed"], errors="ignore").to_csv(index=False)
+    source_stat = Path(source).stat()
+    signature = hashlib.sha256(
+        f"{source}|{source_stat.st_size}|{source_stat.st_mtime_ns}|{crop}|{signature_data}".encode()
+    ).hexdigest()
+    if st.button("Wygeneruj film z punktami", icon=":material/movie:"):
+        output = RESULTS_DIR / "overlays" / f"overlay_{uuid4().hex}.mp4"
+        try:
+            with st.spinner("Nakładanie punktów na kolejne klatki..."):
+                export_overlay_video(source, rows, output, crop_mode=crop)
+            st.session_state.overlay_video = (signature, str(output))
+        except (ValueError, RuntimeError, OSError, cv2.error) as error:
+            st.error(f"Nie udało się wygenerować filmu: {error}")
+    saved = st.session_state.get("overlay_video")
+    if saved and saved[0] == signature and Path(saved[1]).exists():
+        st.video(saved[1])
+        with Path(saved[1]).open("rb") as video_file:
+            st.download_button("Pobierz film z punktami", video_file,
+                               file_name=Path(saved[1]).name, mime="video/mp4")
+        st.caption("Podgląd MP4 bez dźwięku, maksymalnie 720 px wysokości. "
+                   "Zachowuje kolejność klatek i FPS z CSV; przy VFR jest podglądem, nie źródłem czasu pomiaru.")
 
 
 def _selection_view(data: pd.DataFrame | None) -> None:
@@ -208,12 +279,13 @@ def _annotation_view() -> None:
         ) if not existing.empty else pd.Series(dtype=bool)
         existing = existing.loc[~key_mask] if not existing.empty else existing
         write_csv(pd.concat([existing, pd.DataFrame([record])], ignore_index=True), path)
-        st.success(f"Zapisano kąt referencyjny {record['knee_angle_reference']:.2f}°.")
+        st.success(f"Zapisano referencyjne zgięcie kolana {record['knee_flexion_deg']:.2f}°.")
 
 
 def _validation_view(data: pd.DataFrame | None) -> None:
     """Render reference merge and per-frame validation results."""
     st.subheader("Walidacja")
+    st.caption("Błędy dotyczą zgięcia 2D: MediaPipe − referencja. Dodatni bias oznacza większe zgięcie MediaPipe.")
     reference_upload = st.file_uploader("reference_annotations.csv", type=["csv"], key="reference_csv")
     reference_path = REFERENCE_DIR / "reference_annotations.csv"
     reference = pd.read_csv(reference_upload) if reference_upload else (read_csv(reference_path) if reference_path.exists() else None)
@@ -227,7 +299,7 @@ def _validation_view(data: pd.DataFrame | None) -> None:
     validation = st.session_state.validation
     if validation is not None:
         st.dataframe(validation[[
-            "video_id", "frame_number", "side", "angle_mediapipe", "knee_angle_reference",
+            "video_id", "frame_number", "side", "angle_mediapipe", "angle_reference",
             "error_signed", "error_absolute", "hip_distance_px", "knee_distance_px", "ankle_distance_px",
         ]], hide_index=True)
 
@@ -242,6 +314,7 @@ def _statistics_view() -> None:
     validation = validation.copy()
     validation["visibility_group"] = validation["min_visibility"].map(classify_visibility)
     summary = grouped_statistics(validation, ["video_id", "person_id", "visibility_group"])
+    summary["angle_definition"] = "knee_flexion_2d_deg"
     write_csv(summary, RESULTS_DIR / "summary_statistics.csv")
     st.dataframe(summary, hide_index=True)
     scatter = alt.Chart(validation).mark_circle(size=65).encode(
@@ -285,10 +358,30 @@ def main() -> None:
     st.caption("Pomiar 2D z nagrania bocznego z wykorzystaniem MediaPipe")
     tabs = st.tabs([
         "Nagranie i ekstrakcja", "Kąt kolana", "Jakość punktów", "Wybór klatek",
-        "Ręczna anotacja", "Walidacja", "Analiza statystyczna", "Eksport",
+        "Ręczna anotacja", "Walidacja", "Analiza statystyczna", "Eksport", "Podgląd szkieletu",
     ])
-    data = st.session_state.extracted
     with tabs[0]: _extraction_view()
+    data = st.session_state.extracted
+    if data is not None and (
+        "angle_geometry" not in data or not data["angle_geometry"].eq("pixel_2d_v1").all()
+        or "knee_flexion_deg" not in data or "knee_internal_angle_deg" not in data
+    ):
+        try:
+            data = add_pixel_angle_columns(data)
+            data["knee_angle_smoothed"] = smooth_series(data["knee_angle_raw"].to_numpy(), "median", 5)
+            data["knee_flexion_smoothed_deg"] = 180.0 - data["knee_angle_smoothed"]
+            data = add_quality_columns(data)
+            st.session_state.extracted = data
+            st.session_state.validation = None
+            st.session_state.selected_frames = None
+            st.info("Przeliczono kąty i jakość z zapisanych pikseli. Plik źródłowy CSV nie został zmieniony; "
+                    "poprawione dane można pobrać w zakładce Eksport.")
+        except (ValueError, KeyError) as error:
+            st.error(f"Nie można przeliczyć kątów starego CSV: {error}")
+            return
+    previous_validation = st.session_state.validation
+    if previous_validation is not None and "angle_definition" not in previous_validation:
+        st.session_state.validation = None
     with tabs[1]: _angle_view(data)
     with tabs[2]: _quality_view(data)
     with tabs[3]: _selection_view(data)
@@ -296,6 +389,7 @@ def main() -> None:
     with tabs[5]: _validation_view(data)
     with tabs[6]: _statistics_view()
     with tabs[7]: _export_view(data)
+    with tabs[8]: _overlay_view(data)
 
 
 if __name__ == "__main__":

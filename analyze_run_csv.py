@@ -17,6 +17,7 @@ def main() -> None:
     args = parser.parse_args()
     results = merge_with_reference(read_csv(args.extracted), read_csv(args.reference))
     summary = grouped_statistics(results, ["video_id", "person_id"])
+    summary["angle_definition"] = "knee_flexion_2d_deg"
     write_csv(results, args.results)
     write_csv(summary, args.summary)
     print(summary.to_string(index=False))
