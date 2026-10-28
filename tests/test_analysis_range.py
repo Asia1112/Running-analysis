@@ -16,6 +16,7 @@ from src.knee_angle_validation.pose_extraction import process_video
 from src.knee_angle_validation.provenance import frame_limits, validate_time_range, recording_metadata
 from src.knee_angle_validation.reference_annotation import select_reference_frames, build_reference_annotation
 from src.knee_angle_validation.validation import merge_with_reference
+from src.knee_angle_validation.video_timing import verify_cfr
 
 
 class AnalysisRangeTests(unittest.TestCase):
@@ -46,6 +47,8 @@ class AnalysisRangeTests(unittest.TestCase):
         detector.detect_for_video.return_value = SimpleNamespace(pose_landmarks=[])
         with patch('src.knee_angle_validation.pose_extraction.cv2.VideoCapture', return_value=capture), \
              patch('src.knee_angle_validation.pose_extraction.vision.PoseLandmarker.create_from_options', return_value=detector), \
+             patch('src.knee_angle_validation.pose_extraction.audit_video_timing',
+                   side_effect=lambda source, actual_fps: verify_cfr([i / actual_fps for i in range(count)], 1e-6, actual_fps)), \
              warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
             result = process_video(source, root / 'points.csv', 'v1', 'p1', 'right', model_path=model,
@@ -77,6 +80,8 @@ class AnalysisRangeTests(unittest.TestCase):
             self.assertEqual(merged.analysis_start_s.tolist(), [1.])
             with self.assertRaises(ValueError):
                 merge_with_reference(result.data, reference.assign(analysis_end_s=4.))
+            with self.assertRaisesRegex(ValueError, 'inny czas klatki'):
+                merge_with_reference(result.data, reference.assign(time_s=reference.time_s + 0.01))
 
     def test_fractional_boundaries_and_sixty_fps_twenty_second_window(self):
         self.assertEqual(frame_limits(0.3, 0.6, 10.), (3, 6))

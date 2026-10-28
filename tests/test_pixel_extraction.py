@@ -12,6 +12,7 @@ import pandas as pd
 from src.knee_angle_validation.pose_extraction import process_video
 from src.knee_angle_validation.reference_annotation import build_reference_annotation
 from src.knee_angle_validation.validation import merge_with_reference
+from src.knee_angle_validation.video_timing import verify_cfr
 
 
 class PixelExtractionTests(unittest.TestCase):
@@ -37,6 +38,7 @@ class PixelExtractionTests(unittest.TestCase):
                 source.write_bytes(b"source video")
                 with patch('src.knee_angle_validation.pose_extraction.cv2.VideoCapture', return_value=capture), \
                      patch('src.knee_angle_validation.pose_extraction.vision.PoseLandmarker.create_from_options', return_value=detector), \
+                     patch('src.knee_angle_validation.pose_extraction.audit_video_timing', return_value=verify_cfr([0., 1/60], 1e-6, 60.)), \
                      warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
                     result = process_video(source, output, 'v1', 'p1', side,

@@ -17,6 +17,7 @@ from .knee_angle import add_pixel_angle_columns
 from .smoothing import smooth_series
 from .provenance import file_sha256, new_analysis_id, recording_metadata, validate_time_range, frame_limits
 from .experiment_metadata import normalize_experiment_metadata
+from .video_timing import audit_video_timing, TIME_SOURCE
 
 
 SIDE_INDEXES = {
@@ -65,7 +66,11 @@ def read_analysis_frame(
     """Read the same unannotated frame geometry used during pose extraction."""
     capture = cv2.VideoCapture(str(video_path))
     try:
-        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        if not isinstance(frame_number, (int, np.integer)) or frame_number < 0:
+            raise ValueError("Numer klatki musi być nieujemną liczbą całkowitą.")
+        for _ in range(frame_number):
+            if not capture.grab():
+                raise RuntimeError(f"Cannot read frame {frame_number}")
         ok, frame = capture.read()
         if not ok:
             raise RuntimeError(f"Cannot read frame {frame_number}")
@@ -136,7 +141,10 @@ def process_video(
         raise RuntimeError(f"Cannot open source video: {source}")
     fps = float(capture.get(cv2.CAP_PROP_FPS))
     try:
-        first_frame, stop_frame = frame_limits(start_time_s, end_time_s, fps)
+        frame_limits(start_time_s, end_time_s, fps)  # Validate FPS without using it as the time axis.
+        timing = audit_video_timing(source, fps)
+        first_frame, stop_frame = timing.frame_range(start_time_s, end_time_s)
+        times = timing.relative_times
     except ValueError:
         capture.release()
         raise
@@ -147,19 +155,22 @@ def process_video(
     try:
         landmarker = vision.PoseLandmarker.create_from_options(options)
         frame_number = 0
-        while stop_frame is None or frame_number < stop_frame:
+        previous_timestamp_ms = None
+        while frame_number < stop_frame:
             ok, original = capture.read()
             if not ok:
-                if end_time_s is not None and frame_number / fps < end_time_s - 1e-9:
-                    raise ValueError(f"Nagranie kończy się lub nie można go odczytać przy {frame_number / fps:.6f} s; "
-                                     "wybrany fragment nie jest kompletny. Skróć zakres analizy.")
-                break
+                raise ValueError("Odczyt OpenCV zakończył się przed końcem wybranego zakresu PTS.")
+            if frame_number >= len(timing.pts_s):
+                raise ValueError("Liczba klatek OpenCV nie zgadza się z kontrolą PTS.")
             if frame_number < first_frame:
                 frame_number += 1
                 continue
             frame = resize_frame(crop_frame(original, crop_mode), resize_height)
             height, width = frame.shape[:2]
-            timestamp_ms = round(frame_number / fps * 1000)
+            timestamp_ms = round(times[frame_number] * 1000)
+            if previous_timestamp_ms is not None and timestamp_ms <= previous_timestamp_ms:
+                raise ValueError("PTS klatek po zaokrągleniu do milisekund nie rosną; nie zmieniono sztucznie czasu MediaPipe.")
+            previous_timestamp_ms = timestamp_ms
             image = mp.Image(
                 image_format=mp.ImageFormat.SRGB,
                 data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
@@ -168,7 +179,10 @@ def process_video(
             landmarks = detected.pose_landmarks[0] if detected.pose_landmarks else None
             row: dict[str, object] = {
                 "video_id": video_id, "person_id": person_id, "frame_number": frame_number,
-                "time_s": frame_number / fps, "fps": fps, "image_width": width,
+                "time_s": times[frame_number], "time_nominal_s": frame_number / fps, "fps": fps, "image_width": width,
+                "mediapipe_timestamp_ms": timestamp_ms,
+                "source_pts_s": timing.pts_s[frame_number],
+                "time_pts_s": times[frame_number],
                 "image_height": height, "side": side, "pose_found": landmarks is not None,
             }
             if landmarks is None:
@@ -179,6 +193,8 @@ def process_video(
                     row.update(_point_record(point, landmarks[index], width, height))
             rows.append(row)
             frame_number += 1
+        if end_time_s is None and capture.read()[0]:
+            raise ValueError("OpenCV odczytuje więcej klatek niż oś czasu PTS.")
     finally:
         capture.release()
         if landmarker is not None:
@@ -188,7 +204,9 @@ def process_video(
     if data.empty:
         raise ValueError("Wybrany zakres nie zawiera czytelnych klatek nagrania.")
     provenance.update(analysis_start_s=start_time_s,
-                      analysis_end_s=end_time_s if end_time_s is not None else frame_number / fps)
+                      analysis_end_s=end_time_s if end_time_s is not None else timing.end_time_s,
+                      analysis_first_frame=first_frame, analysis_stop_frame=stop_frame,
+                      time_source=TIME_SOURCE)
     for key, value in provenance.items():
         data[key] = value
     for key, value in study.items():
@@ -204,6 +222,7 @@ def process_video(
     with csv_path.open("x", encoding="utf-8", newline="") as stream:
         data.to_csv(stream, index=False)
     metadata = {**provenance, **study, "source_name": Path(source).name,
+                "timing_audit": timing.report(),
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "model_sha256": file_sha256(model_path), "model_name": Path(model_path).name,
                 "fps": fps, "frames": len(data),

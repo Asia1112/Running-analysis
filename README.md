@@ -37,6 +37,7 @@ pose_run/
     reference_annotation.py    wybór klatek i rekord anotacji
     annotation_storage.py      bezpieczny zapis sesji bez zastępowania pomiarów
     provenance.py              identyfikacja filmu, analizy i geometrii obrazu
+    video_timing.py            odczyt PTS i kontrola osi czasu CFR/VFR
     experiment_metadata.py     mapowanie tabeli osób, prędkości i stron nagrań
     annotation_component.py    klikalna anotacja Streamlit
     validation.py              łączenie danych i obliczanie błędów
@@ -167,8 +168,8 @@ podstawie anotować ani nakładać punktów na dowolnie wgrany film. Do takiej p
 wykonaj nową ekstrakcję. Starszych danych i plików nie migrujemy automatycznie.
 Porównanie dwóch starszych CSV nie potwierdza tożsamości nagrania; użytkownik
 musi sprawdzić ich pochodzenie. Nowej ekstrakcji nie łączymy ze starą referencją.
-Hash identyfikuje plik, ale nie potwierdza poprawności czasów VFR ani dekodowania
-i orientacji obrazu — te kwestie wymagają osobnej weryfikacji.
+Hash identyfikuje plik. Nowa ekstrakcja odczytuje PTS klatek; orientacja obrazu
+i poprawność wskazań anatomicznych nadal wymagają osobnej weryfikacji.
 
 ## Format danych CSV
 
@@ -181,7 +182,7 @@ inny zakres. Zmiana granic unieważnia poprzedni stan; nowa ekstrakcja tworzy
 nowy `analysis_id` i zachowuje wcześniejsze pliki.
 
 Zakres jest półotwarty `[początek, koniec)`: klatka o czasie równym końcowi
-nie jest analizowana. Przy 60 FPS zakres 5–25 s zawiera 1200 klatek o numerach
+nie jest analizowana. Przy dokładnym CFR 60 FPS zakres 5–25 s zawiera 1200 klatek o numerach
 300–1499. `frame_number` zaczyna się od 0 w pełnym filmie i nigdy nie jest
 przenumerowywany po wybraniu fragmentu; `time_s` i znaczniki MediaPipe nadal
 odnoszą się do pełnego nagrania. Model otrzymuje wyłącznie klatki z zakresu;
@@ -198,9 +199,8 @@ wyświetla źródłowy numer klatki na nakładce.
 Zakres pusty, odwrócony, ujemny lub niekompletny (np. 20 s z filmu krótszego
 niż 20 s) jest odrzucany bez zapisu częściowego CSV. W takim przypadku ustaw
 krótszy, prawidłowy zakres. Niepoprawne FPS również zatrzymuje ekstrakcję;
-nie podstawiamy już domyślnego 30 FPS. Czas nadal pochodzi z nominalnego FPS
-OpenCV (`frame_number / fps`); to **nie rozwiązuje obsługi rzeczywistych
-znaczników VFR**. Kwestia VFR i orientacji nagrań wymaga osobnego sprawdzenia.
+nie podstawiamy domyślnego 30 FPS. Nowe analizy korzystają z rzeczywistych PTS
+zgodnie z opisem poniżej; liczba klatek w 20 s może zależeć od VFR.
 
 W CLI `--start` wskazuje początek, a `--end` wyłączony koniec. Bez `--end`
 koniec wynosi `--start + 20 s`:
@@ -213,6 +213,46 @@ Niskopoziomowe `process_video()` zachowuje zgodność ze starszym wywołaniem:
 domyślne `end_time_s=None` oznacza odczyt do końca filmu. Interfejs i CLI
 przekazują granice jawnie. Starsze CSV bez pól zakresu nie są automatycznie
 przycinane; nową próbę przygotuj przez ponowną ekstrakcję.
+
+### Czas filmu i VFR
+
+Przed ekstrakcją FFmpeg z istniejącego `imageio-ffmpeg` odczytuje PTS wszystkich
+klatek pierwszego strumienia wideo. Używany jest filtr
+[`showinfo`](https://ffmpeg.org/ffmpeg-filters.html#showinfo); plik źródłowy nie
+jest konwertowany. Ten dodatkowy przebieg dekodowania wydłuża przygotowanie analizy.
+Nie instalujemy dodatkowego FFmpeg ani biblioteki.
+
+- `source_pts_s`: odczytany PTS klatki w sekundach, z zachowaniem początku strumienia.
+- `time_s` i `time_pts_s`: PTS minus PTS pierwszej klatki pełnego filmu; początek filmu to 0 s.
+- `time_nominal_s`: pomocniczy `frame_number / fps`, do kontroli różnicy względem PTS.
+- `mediapipe_timestamp_ms`: rzeczywisty czas względny zaokrąglony do ms, przekazany modelowi.
+- `time_source=ffmpeg_pts_v1`: oznaczenie nowego sposobu wyznaczania czasu.
+
+Zakres `[start, end)` jest wybierany według `time_s`, również przy VFR.
+`analysis_first_frame` i `analysis_stop_frame` zapisują źródłowe granice numerów
+klatek (koniec wyłączony); służą też do eksportu nakładki bez przeliczania
+zakresu przez nominalny FPS. Wybór 30 klatek nadal korzysta wyłącznie z czasu.
+Anotacja czyta klatki kolejno od początku filmu, aby zachować ich indeksy
+także przy VFR; odczyt odległej klatki może potrwać dłużej niż przewijanie.
+Referencja zachowuje PTS, czas i sposób jego wyznaczania. Walidacja sprawdza
+zgodność czasów dla tych samych kluczy klatek i zachowuje czas w wynikach.
+
+Manifest zawiera `timing_audit`: liczbę klatek, podstawę czasu, pierwszy PTS,
+różnice względem nominalnego FPS i klasyfikację CFR lub VFR/niezgodności FPS.
+Klasyfikacja jest diagnostyczna: przy VFR używamy PTS bez usuwania klatek,
+interpolacji ani dopasowywania czasu do referencji. Tolerancja klasyfikacji
+uwzględnia kwantyzację PTS i nie przekracza 1 ms ani 5% okresu klatki.
+
+Brakujące, nierosnące lub nieprawidłowe PTS, rozbieżność odczytu OpenCV z osią
+PTS i kolizje znaczników po zaokrągleniu do ms zatrzymują analizę bez zapisu
+częściowych wyników. Końcowy czas całego filmu korzysta z czasu trwania
+ostatniej klatki podanego przez dekoder; jeśli go brak, ostatni okres jest
+szacowany z FPS, co manifest jawnie oznacza. Nie zmienia to PTS samych klatek.
+
+Eksport nakładki pozostaje podglądem CFR, więc nie odtwarza nierównych odstępów
+VFR. Właściwą osią pomiaru są CSV z PTS. Starszy CSV bez `time_source` nie
+zostaje automatycznie poprawiony: aplikacja ostrzega, że potrzebna jest nowa
+ekstrakcja. Nie łączymy nowych wyników PTS ze starszą referencją o innej osi czasu.
 
 ### Metadane eksperymentu
 
@@ -335,8 +375,8 @@ Także klatki bez pozy, z NaN kąta lub niskim visibility pozostają w próbie.
 `selection_time_error_s` (czas klatki minus znacznik),
 `selection_requested_count`, `selection_start_s` i `selection_end_s`.
 Wybór jest deterministyczny i nie wymaga ziarna losowania. Algorytm korzysta
-z `time_s` w CSV, także przy nierównych odstępach; nie zastępuje to jeszcze
-odczytu rzeczywistych znaczników VFR podczas ekstrakcji.
+z `time_s` w CSV, także przy nierównych odstępach; w nowych ekstrakcjach
+kolumna ta pochodzi z rzeczywistych PTS klatek.
 
 W widoku anotacji wyświetlany jest obraz bez punktów MediaPipe. Anotator wskazuje kolejno
 biodro, kolano i kostkę; może cofnąć lub wyczyścić zaznaczenia. Odcinki są
@@ -416,8 +456,8 @@ badaniem pozostają m.in. następujące problemy wykryte podczas przeglądu:
 - Nowe analizy mają osobne katalogi i powiązanie filmu, punktów oraz anotacji
   przez SHA-256, identyfikator analizy i geometrię obrazu. Zmiana wejścia czyści stan.
 - Należy zweryfikować synchronizację punktów komponentu anotacyjnego,
-  rzeczywiste czasy i orientację klatek oraz obsługę brakujących danych.
+  orientację klatek oraz obsługę brakujących danych. Nowe ekstrakcje zapisują PTS.
 
 Podstawowe testy jednostkowe nie potwierdzają jeszcze poprawności całego
 procesu badawczego. Kolejne etapy powinny objąć raportowanie kompletności
-dopasowania, rzeczywiste czasy klatek i obsługę brakujących danych.
+dopasowania, orientację klatek i obsługę brakujących danych.

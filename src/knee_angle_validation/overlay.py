@@ -84,7 +84,9 @@ def export_overlay_video(source: str | Path, data: pd.DataFrame, output: str | P
         metadata = require_source_match(rows, file_sha256(source))
         if crop_mode != metadata["crop_mode"] or resize_height != metadata["resize_height"]:
             raise ValueError("Kadrowanie i skalowanie muszą odpowiadać metadanym ekstrakcji.")
-        if set(RANGE_KEYS).issubset(metadata):
+        if metadata.get("time_source") == "ffmpeg_pts_v1":
+            interval = (metadata["analysis_first_frame"], metadata["analysis_stop_frame"])
+        elif set(RANGE_KEYS).issubset(metadata):
             interval = frame_limits(metadata["analysis_start_s"], metadata["analysis_end_s"], float(rows.fps.iloc[0]))
     expected = np.arange(*interval) if interval else np.arange(len(rows))
     if not np.array_equal(rows["frame_number"].to_numpy(), expected):

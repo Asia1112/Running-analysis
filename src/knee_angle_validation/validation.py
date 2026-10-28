@@ -5,7 +5,7 @@ import pandas as pd
 
 from .knee_angle import add_pixel_angle_columns
 from .annotation_storage import select_reference_session
-from .provenance import PROVENANCE_KEYS, RANGE_KEYS, recording_metadata
+from .provenance import PROVENANCE_KEYS, RANGE_KEYS, TIMING_KEYS, recording_metadata
 from .experiment_metadata import EXPERIMENT_KEYS, experiment_values
 
 
@@ -67,6 +67,14 @@ def merge_with_reference(extracted: pd.DataFrame, reference: pd.DataFrame, *,
             raise ValueError("MediaPipe i referencja pochodzą z innego filmu, analizy lub geometrii obrazu.")
         reference = reference.drop(columns=list(PROVENANCE_KEYS))
         reference = reference.drop(columns=list(RANGE_KEYS), errors="ignore")
+        reference = reference.drop(columns=list(TIMING_KEYS), errors="ignore")
+    for key in ("time_s", "source_pts_s", "time_pts_s"):
+        if key in reference and key in extracted:
+            paired = extracted[JOIN_KEYS + [key]].merge(reference[JOIN_KEYS + [key]], on=JOIN_KEYS, validate="one_to_one")
+            if not np.isclose(pd.to_numeric(paired[f"{key}_x"], errors="coerce"),
+                              pd.to_numeric(paired[f"{key}_y"], errors="coerce"), atol=1e-9, rtol=0).all():
+                raise ValueError(f"MediaPipe i referencja mają inny czas klatki: {key}.")
+            reference = reference.drop(columns=key)
     if set(EXPERIMENT_KEYS).intersection(extracted.columns) or set(EXPERIMENT_KEYS).intersection(reference.columns):
         if experiment_values(extracted) != experiment_values(reference):
             raise ValueError("MediaPipe i referencja mają inne metadane eksperymentu.")

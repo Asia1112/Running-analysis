@@ -11,6 +11,7 @@ import pandas as pd
 
 PROVENANCE_KEYS = ("analysis_id", "source_sha256", "crop_mode", "resize_height")
 RANGE_KEYS = ("analysis_start_s", "analysis_end_s")
+TIMING_KEYS = ("time_source", "analysis_first_frame", "analysis_stop_frame")
 
 
 def validate_time_range(start: float, end: float | None) -> tuple[float, float | None]:
@@ -69,6 +70,19 @@ def recording_metadata(data: pd.DataFrame) -> dict | None:
         result[key] = str(result[key])
     if result["side"] not in ("left", "right"):
         raise ValueError("Nieprawidłowa strona ciała w metadanych.")
+    if "time_source" in data:
+        if data.time_source.isna().any() or not data.time_source.eq("ffmpeg_pts_v1").all():
+            raise ValueError("Nieprawidłowa informacja o weryfikacji czasu filmu.")
+        result["time_source"] = "ffmpeg_pts_v1"
+        for key in TIMING_KEYS[1:]:
+            if key not in data or data[key].isna().any() or data[key].nunique() != 1:
+                raise ValueError(f"Niekompletny zakres klatek PTS: {key}.")
+            number = float(data[key].iloc[0])
+            if not math.isfinite(number) or number < 0 or not number.is_integer():
+                raise ValueError(f"Nieprawidłowy numer klatki w metadanych: {key}.")
+            result[key] = int(number)
+        if result["analysis_stop_frame"] <= result["analysis_first_frame"]:
+            raise ValueError("Pusty zakres klatek PTS.")
     if set(RANGE_KEYS).intersection(data.columns):
         if not set(RANGE_KEYS).issubset(data.columns):
             raise ValueError("Niekompletny zakres analizy w CSV.")

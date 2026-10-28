@@ -7,7 +7,7 @@ import pandas as pd
 
 from .knee_angle import calculate_knee_angle
 from .annotation_storage import annotation_identity
-from .provenance import PROVENANCE_KEYS, RANGE_KEYS
+from .provenance import PROVENANCE_KEYS, RANGE_KEYS, TIMING_KEYS
 from .experiment_metadata import EXPERIMENT_KEYS
 
 
@@ -18,6 +18,7 @@ REFERENCE_COLUMNS = [
     "knee_internal_angle_deg", "knee_flexion_deg", "angle_geometry",
     *PROVENANCE_KEYS,
     *RANGE_KEYS,
+    *TIMING_KEYS, "time_s", "source_pts_s", "time_pts_s",
     *EXPERIMENT_KEYS,
 ]
 
@@ -104,6 +105,7 @@ def build_reference_annotation(
         **identity,
         **{key: frame[key] for key in PROVENANCE_KEYS if key in frame},
         **{key: frame[key] for key in RANGE_KEYS if key in frame},
+        **{key: frame[key] for key in (*TIMING_KEYS, "time_s", "source_pts_s", "time_pts_s") if key in frame},
         **{key: frame[key] for key in EXPERIMENT_KEYS if key in frame},
         "hip_x_ref": hip[0], "hip_y_ref": hip[1],
         "knee_x_ref": knee[0], "knee_y_ref": knee[1],
