@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import warnings
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -32,13 +33,22 @@ class PixelExtractionTests(unittest.TestCase):
                 model = Path(directory) / "model.task"
                 model.touch()
                 output = Path(directory) / "extracted.csv"
+                source = Path(directory) / "source.mov"
+                source.write_bytes(b"source video")
                 with patch('src.knee_angle_validation.pose_extraction.cv2.VideoCapture', return_value=capture), \
                      patch('src.knee_angle_validation.pose_extraction.vision.PoseLandmarker.create_from_options', return_value=detector), \
                      warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
-                    result = process_video('source.mov', output, 'v1', 'p1', side,
+                    result = process_video(source, output, 'v1', 'p1', side,
                                            model_path=model, resize_height=0)
                 saved = pd.read_csv(output)
+                metadata = json.loads(output.with_suffix('.metadata.json').read_text(encoding='utf-8'))
+                self.assertEqual(metadata['analysis_id'], saved.analysis_id.iloc[0])
+                self.assertEqual(metadata['source_sha256'], saved.source_sha256.iloc[0])
+                self.assertEqual(metadata['crop_mode'], 'none')
+                self.assertEqual(metadata['resize_height'], 0)
+                self.assertEqual(metadata['frames'], 2)
+                self.assertEqual(len(metadata['model_sha256']), 64)
                 self.assertAlmostEqual(saved.loc[0, "knee_internal_angle_deg"], 90.)
                 self.assertAlmostEqual(saved.loc[0, "knee_flexion_deg"], 90.)
                 self.assertTrue(saved.loc[1, ["knee_internal_angle_deg", "knee_flexion_deg"]].isna().all())
@@ -47,6 +57,10 @@ class PixelExtractionTests(unittest.TestCase):
                 merged = merge_with_reference(result.data, pd.DataFrame([reference]))
                 self.assertAlmostEqual(merged.loc[0, "error_signed"], 0.)
                 self.assertAlmostEqual(merged.loc[0, "error_internal_signed"], 0.)
+                before = output.read_bytes()
+                with self.assertRaisesRegex(ValueError, "Wyniki już istnieją"):
+                    process_video(source, output, 'v1', 'p1', side, model_path=model)
+                self.assertEqual(output.read_bytes(), before)
 
 
 if __name__ == '__main__':

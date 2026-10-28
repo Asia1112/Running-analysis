@@ -5,6 +5,7 @@ import pandas as pd
 
 from .knee_angle import add_pixel_angle_columns
 from .annotation_storage import select_reference_session
+from .provenance import PROVENANCE_KEYS, recording_metadata
 
 
 JOIN_KEYS = ["video_id", "person_id", "frame_number", "side"]
@@ -60,6 +61,10 @@ def merge_with_reference(extracted: pd.DataFrame, reference: pd.DataFrame, *,
     reference = select_reference_session(reference, annotator_id, session)
     extracted = _unique_measurements(extracted, "MediaPipe")
     reference = _unique_measurements(reference, "Referencja")
+    if set(PROVENANCE_KEYS).intersection(extracted.columns) or set(PROVENANCE_KEYS).intersection(reference.columns):
+        if recording_metadata(extracted) != recording_metadata(reference):
+            raise ValueError("MediaPipe i referencja pochodzą z innego filmu, analizy lub geometrii obrazu.")
+        reference = reference.drop(columns=list(PROVENANCE_KEYS))
     # Always derive both methods from pixels, including older CSV inputs.
     extracted = add_pixel_angle_columns(extracted)
     reference = add_pixel_angle_columns(reference, reference=True)

@@ -36,6 +36,7 @@ pose_run/
     frame_quality.py           heurystyki jakości klatek
     reference_annotation.py    wybór klatek i rekord anotacji
     annotation_storage.py      bezpieczny zapis sesji bez zastępowania pomiarów
+    provenance.py              identyfikacja filmu, analizy i geometrii obrazu
     annotation_component.py    klikalna anotacja Streamlit
     validation.py              łączenie danych i obliczanie błędów
     statistics.py              statystyki opisowe
@@ -45,9 +46,9 @@ pose_run/
   tests/                       testy aktualnego pakietu
   data/
     raw/                       oryginalne nagrania
-    extracted/                 punkty i kąty MediaPipe
-    reference/                 wybór klatek i ręczne anotacje
-    results/                   wyniki walidacji i statystyki
+    extracted/                 wcześniejsze ekstrakcje (bez automatycznej migracji)
+    reference/                 wcześniejsze anotacje (bez automatycznej migracji)
+    results/analyses/           nowe analizy, osobny katalog dla każdego analysis_id
   archive/pilot/               lokalne wyniki wcześniejszych prób
 ```
 
@@ -65,8 +66,8 @@ Archiwalne CSV używają starszego schematu i nie są wejściem aktualnego CLI.
 
 - Polecenia uruchamiaj z katalogu głównego projektu.
 - Oryginały nagrań przechowuj w `data/raw/`; wyników nie zapisuj obok kodu.
-- Przy ekstrakcji kolejnego filmu podawaj osobną ścieżkę `--csv`.
-- Dla osobnych porównań podawaj osobne `--results` i `--summary`.
+- Bez `--csv` CLI tworzy osobny katalog analizy; jawna ścieżka nie może już istnieć.
+- Bez `--results` i `--summary` każde porównanie CLI dostaje osobny podkatalog.
 - Dane badawcze i wyniki są pomijane przez Git; wymagają osobnej kopii zapasowej.
 - Środowisko `.venv` oraz ustawienia PyCharma pozostają lokalne.
 
@@ -82,7 +83,6 @@ Ekstrakcja poza interfejsem:
 ```powershell
 .\.venv\Scripts\python.exe pose_video.py `
   --source data\raw\run13.MOV --video-id video_001 `
-  --csv data\extracted\video_001.csv `
   --person-id person_001 --side left
 ```
 
@@ -90,10 +90,9 @@ Walidacja poza interfejsem:
 
 ```powershell
 .\.venv\Scripts\python.exe analyze_run_csv.py `
-  --extracted data\extracted\video_001.csv `
-  --reference data\reference\reference_annotations.csv `
-  --results data\results\video_001_validation.csv `
-  --summary data\results\video_001_summary.csv
+  --extracted data\results\analyses\ANALYSIS_ID\extracted_landmarks.csv `
+  --reference data\results\analyses\ANALYSIS_ID\reference_annotations.csv `
+  --annotator-id annotator_01 --session IDENTYFIKATOR_SESJI
 ```
 
 Testy:
@@ -107,7 +106,7 @@ Testy:
 1. Wgraj nagranie w zakładce „Nagranie i ekstrakcja”. Wykonaj ekstrakcję
    albo wczytaj zapisany CSV dotyczący dokładnie tego nagrania.
 2. Otwórz zakładkę „Podgląd szkieletu” i zaznacz „Pokaż punkty na filmie”.
-3. Sprawdź kadrowanie i wybierz numer klatki suwakiem.
+3. Wybierz numer klatki suwakiem; kadrowanie pochodzi automatycznie z CSV.
 4. Kliknij „Wygeneruj film z punktami”, aby odtworzyć lub pobrać MP4.
 
 Nakładka pokazuje trzy zapisane punkty wybranej nogi: biodro, kolano i kostkę,
@@ -116,11 +115,59 @@ zawiera tylko punkty badanej kończyny. Braki nie są interpolowane. Oryginał
 i CSV nie są zmieniane, a detekcja MediaPipe nie jest wykonywana ponownie.
 Ręczna anotacja pozostaje na obrazie bez nakładki.
 
-Filmy są zapisywane pod unikalnymi nazwami w `data/results/overlays/`,
+Filmy są zapisywane pod unikalnymi nazwami w `data/results/analyses/ANALYSIS_ID/overlays/`,
 bez dźwięku, w H.264 i z wysokością do 720 px. FPS pochodzi z CSV;
 eksport nie odtwarza zmiennych odstępów czasowych VFR. Sprawdzane są wymiary,
-FPS oraz liczba klatek, ale przy imporcie CSV trzeba samodzielnie dopasować
-film i kadrowanie. Nakładka służy do kontroli punktów, nie potwierdza ich dokładności.
+FPS oraz liczba klatek. SHA-256 musi odpowiadać wgranemu filmowi, a kadrowanie
+i skalowanie są odczytywane z metadanych CSV. Nakładka służy do kontroli punktów,
+nie potwierdza ich dokładności.
+
+## Identyfikacja nagrań i odtwarzanie analizy
+
+Każda nowa ekstrakcja otrzymuje unikalny `analysis_id`, także przy powtórnym
+przetworzeniu tego samego filmu. Film wgrany w aplikacji jest kopiowany do
+`data/raw/SHA256.mov` (z zachowaniem rozszerzenia). Nazwa pochodzi z zawartości,
+więc dwa różne filmy o tej samej nazwie nie zastępują się nawzajem.
+
+```text
+data/results/analyses/ANALYSIS_ID/
+  extracted_landmarks.csv
+  extracted_landmarks.metadata.json
+  selected_reference_frames.csv
+  reference_annotations.csv
+  validation_results.csv
+  summary_statistics.csv
+  overlays/
+  validations/                   osobne porównania uruchomione z CLI
+```
+
+Punkty, wybór klatek, nowe anotacje i wyniki porównania zawierają `analysis_id`,
+`source_sha256`, `crop_mode` i `resize_height`. Identyfikatory `video_id` oraz
+`person_id` podaje użytkownik; SHA-256 rozróżnia fizyczne pliki niezależnie od nazw.
+Manifest JSON nowej ekstrakcji zawiera też hash modelu, nazwę pliku źródłowego,
+datę, FPS, liczbę klatek, wymiary i ustawienia wygładzania.
+
+Zmiana filmu, osoby, Video ID, strony lub kadrowania czyści bieżące punkty,
+wybór klatek, walidację, statystyki, szkice anotacji i podgląd nakładki.
+Pliki wcześniejszych analiz pozostają na dysku. Aby wrócić do analizy,
+wgraj właściwy film i jego oryginalny `extracted_landmarks.csv`; aplikacja
+odnajdzie anotacje w katalogu `analysis_id`. Jeśli CSV był już wybrany przed
+zmianą filmu lub ustawień, usuń go z pola importu i wczytaj ponownie.
+Zmieniony CSV z tym samym identyfikatorem nie zastąpi zapisanej ekstrakcji.
+
+Anotacja i nakładka wymagają zgodności SHA-256 i używają geometrii zapisanej
+w CSV. Walidacja odrzuca pomieszanie nowych danych z inną analizą, filmem,
+kadrowaniem lub wysokością skalowania. Statystyki do pobrania pochodzą
+z bieżącej walidacji w pamięci, a nie ze wspólnego pliku poprzedniego filmu.
+Nazwy pobieranych CSV mają prefiks `analysis_id`.
+
+Starsze CSV bez metadanych można analizować tabelarycznie; nie wolno na ich
+podstawie anotować ani nakładać punktów na dowolnie wgrany film. Do takiej pracy
+wykonaj nową ekstrakcję. Starszych danych i plików nie migrujemy automatycznie.
+Porównanie dwóch starszych CSV nie potwierdza tożsamości nagrania; użytkownik
+musi sprawdzić ich pochodzenie. Nowej ekstrakcji nie łączymy ze starą referencją.
+Hash identyfikuje plik, ale nie potwierdza poprawności czasów VFR ani dekodowania
+i orientacji obrazu — te kwestie wymagają osobnej weryfikacji.
 
 ## Format danych CSV
 
@@ -276,11 +323,11 @@ badaniem pozostają m.in. następujące problemy wykryte podczas przeglądu:
   algorytm warstwowy powodujący błąd indeksów.
 - Poprawiono zapis sesji: rekordy są dopisywane, a powtórzenie tego samego
   klucza jest blokowane bez zastępowania wcześniejszego pomiaru.
-- Aplikacja używa wspólnych nazw filmów i wyników; trzeba powiązać stan i zapis
-  z identyfikatorem nagrania oraz przebiegu analizy.
+- Nowe analizy mają osobne katalogi i powiązanie filmu, punktów oraz anotacji
+  przez SHA-256, identyfikator analizy i geometrię obrazu. Zmiana wejścia czyści stan.
 - Należy zweryfikować synchronizację punktów komponentu anotacyjnego,
   rzeczywiste czasy i orientację klatek oraz obsługę brakujących danych.
 
 Podstawowe testy jednostkowe nie potwierdzają jeszcze poprawności całego
-procesu badawczego. Kolejne etapy powinny objąć bezpieczne powiązanie danych
-z nagraniem, raportowanie kompletności dopasowania i obsługę brakujących danych.
+procesu badawczego. Kolejne etapy powinny objąć raportowanie kompletności
+dopasowania, rzeczywiste czasy klatek i obsługę brakujących danych.

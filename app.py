@@ -29,6 +29,9 @@ from src.knee_angle_validation.reference_annotation import (
 from src.knee_angle_validation.smoothing import smooth_series
 from src.knee_angle_validation.statistics import grouped_statistics, visibility_correlations
 from src.knee_angle_validation.validation import merge_with_reference
+from src.knee_angle_validation.provenance import (
+    PROVENANCE_KEYS, file_sha256, new_analysis_id, recording_metadata, require_source_match,
+)
 
 
 DATA_DIR = Path("data")
@@ -46,6 +49,7 @@ def _initialize_state() -> None:
         "extracted": None, "selected_frames": None, "validation": None,
         "video_path": None, "crop_mode": "none", "side": "left",
         "annotation_drafts": {},
+        "active_analysis_id": None, "source_sha256": None, "summary": None,
         "annotation_session": f"session_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}",
     }
     for key, value in defaults.items():
@@ -53,11 +57,55 @@ def _initialize_state() -> None:
 
 
 def _uploaded_path(uploaded_file: object) -> Path:
-    """Persist one uploaded video under its original extension."""
+    """Persist by content hash, without replacing any other recording."""
     suffix = Path(uploaded_file.name).suffix or ".mp4"
-    path = RAW_DIR / f"uploaded{suffix.lower()}"
-    path.write_bytes(uploaded_file.getbuffer())
+    content = uploaded_file.getbuffer()
+    digest = hashlib.sha256(content).hexdigest()
+    path = RAW_DIR / f"{digest}{suffix.lower()}"
+    if not path.exists():
+        with path.open("xb") as stream:
+            stream.write(content)
+    elif file_sha256(path) != digest:
+        raise ValueError("Zapisana kopia filmu została zmieniona. Nie zastąpiono pliku.")
     return path
+
+
+def _analysis_directory() -> Path:
+    identity = st.session_state.get("active_analysis_id")
+    if not identity:
+        raise ValueError("Najpierw wykonaj lub wczytaj analizę.")
+    return RESULTS_DIR / "analyses" / identity
+
+
+def _reset_analysis() -> None:
+    """Invalidate all results and widget drafts before displaying another source."""
+    for key in ("extracted", "selected_frames", "validation", "summary", "active_analysis_id"):
+        st.session_state[key] = None
+    st.session_state.annotation_drafts = {}
+    for key in list(st.session_state):
+        if key in {"selection_start", "selection_end", "selection_count", "annotation_frame",
+                   "overlay_frame", "overlay_crop", "overlay_video", "show_overlay",
+                   "validation_session", "validation_reference_signature", "reference_csv"} or key.startswith(("annotation_", "notes_annotation_")) and key not in {
+                       "annotation_session", "annotation_annotator", "annotation_drafts"}:
+            del st.session_state[key]
+
+
+def _activate_analysis(data: pd.DataFrame) -> None:
+    """Open one analysis with its own storage; legacy imports remain unverified."""
+    metadata = recording_metadata(data)
+    _reset_analysis()
+    st.session_state.extracted = data
+    st.session_state.active_analysis_id = metadata["analysis_id"] if metadata else new_analysis_id()
+    if metadata:
+        st.session_state.crop_mode = metadata["crop_mode"]
+        st.session_state.side = metadata["side"]
+
+
+def _verified_geometry(data: pd.DataFrame) -> dict:
+    metadata = require_source_match(data, st.session_state.get("source_sha256"))
+    if metadata["analysis_id"] != st.session_state.get("active_analysis_id"):
+        raise ValueError("Dane pochodzą z innej analizy.")
+    return metadata
 
 
 def _image_data_url(frame: np.ndarray) -> str:
@@ -71,6 +119,8 @@ def _image_data_url(frame: np.ndarray) -> str:
 def _download_csv(label: str, data: pd.DataFrame | None, filename: str) -> None:
     """Render a CSV download only when data are available."""
     if data is not None and not data.empty:
+        identity = st.session_state.get("active_analysis_id")
+        filename = f"{identity}_{filename}" if identity else filename
         st.download_button(
             label, data=data.to_csv(index=False).encode("utf-8-sig"), file_name=filename,
             mime="text/csv", icon=":material/download:",
@@ -103,35 +153,66 @@ def _extraction_view() -> None:
     st.subheader("Nagranie i ekstrakcja punktów")
     uploaded = st.file_uploader("Nagranie boczne jednej osoby", type=["mp4", "mov", "avi", "mkv"])
     col1, col2, col3 = st.columns(3)
-    video_id = col1.text_input("Video ID", value="video_001")
-    person_id = col2.text_input("Person ID", value="person_001")
-    side = col3.segmented_control("Noga bliższa kamerze", ["left", "right"], default="left")
-    crop_mode = st.selectbox("Kadrowanie", ["none", "left", "right", "center"])
+    video_id = col1.text_input("Video ID", value="video_001", key="input_video_id")
+    person_id = col2.text_input("Person ID", value="person_001", key="input_person_id")
+    side = col3.segmented_control("Noga bliższa kamerze", ["left", "right"], default="left", key="input_side")
+    crop_mode = st.selectbox("Kadrowanie", ["none", "left", "right", "center"], key="input_crop")
+    upload_token = (uploaded.file_id, uploaded.name, uploaded.size) if uploaded is not None else None
+    if st.session_state.get("uploaded_video_token") != upload_token:
+        _reset_analysis()
+        st.session_state.uploaded_video_token = upload_token
+        path = _uploaded_path(uploaded) if uploaded is not None else None
+        st.session_state.video_path = str(path) if path else None
+        st.session_state.source_sha256 = path.stem if path else None
+    context = (st.session_state.source_sha256, video_id, person_id, side, crop_mode)
+    if st.session_state.get("input_context") != context:
+        _reset_analysis()
+        st.session_state.input_context = context
     if uploaded is not None:
-        path = _uploaded_path(uploaded)
-        st.session_state.video_path = str(path)
-        st.video(str(path))
+        st.video(st.session_state.video_path)
     if st.button("Uruchom ekstrakcję", icon=":material/play_arrow:", disabled=uploaded is None):
-        with st.spinner("Przetwarzanie klatek..."):
-            result = process_video(
-                st.session_state.video_path, EXTRACTED_DIR / "extracted_landmarks.csv",
-                video_id, person_id, side, crop_mode=crop_mode,
-            )
-        st.session_state.extracted = result.data
-        st.session_state.crop_mode = crop_mode
-        st.session_state.side = side
-        st.success(f"Przetworzono {result.frames} klatek; pozycję wykryto w {result.pose_found_pct:.1f}% klatek.")
+        _reset_analysis()
+        analysis_id = new_analysis_id()
+        try:
+            with st.spinner("Przetwarzanie klatek..."):
+                result = process_video(
+                    st.session_state.video_path,
+                    RESULTS_DIR / "analyses" / analysis_id / "extracted_landmarks.csv",
+                    video_id, person_id, side, crop_mode=crop_mode, analysis_id=analysis_id,
+                )
+            _activate_analysis(result.data)
+            st.success(f"Przetworzono {result.frames} klatek; pozycję wykryto w {result.pose_found_pct:.1f}% klatek.")
+        except (ValueError, OSError, RuntimeError) as error:
+            st.error(str(error))
     uploaded_csv = st.file_uploader("Lub wczytaj extracted_landmarks.csv", type=["csv"], key="extracted_csv")
     if uploaded_csv is not None:
         signature = hashlib.sha256(uploaded_csv.getvalue()).hexdigest()
         if st.session_state.get("loaded_extracted_csv_signature") != signature:
-            st.session_state.extracted = pd.read_csv(uploaded_csv)
+            _reset_analysis()
+            try:
+                imported = pd.read_csv(uploaded_csv, dtype={"video_id": str, "person_id": str,
+                                                           "analysis_id": str, "source_sha256": str})
+                _activate_analysis(imported)
+                folder = _analysis_directory()
+                folder.mkdir(parents=True, exist_ok=True)
+                destination = folder / "extracted_landmarks.csv"
+                if not destination.exists():
+                    destination.write_bytes(uploaded_csv.getvalue())
+                elif hashlib.sha256(destination.read_bytes()).hexdigest() != signature:
+                    raise ValueError("Inny CSV używa tego samego analysis_id. Wczytaj oryginał lub wykonaj nową ekstrakcję.")
+                st.success("Wczytano dane ekstrakcji.")
+            except (ValueError, OSError) as error:
+                _reset_analysis()
+                st.error(str(error))
             st.session_state.loaded_extracted_csv_signature = signature
-            st.session_state.selected_frames = None
-            st.session_state.validation = None
-            st.success("Wczytano dane ekstrakcji.")
     else:
         st.session_state.pop("loaded_extracted_csv_signature", None)
+    if st.session_state.extracted is not None:
+        st.caption(f"Katalog bieżącej analizy: {_analysis_directory()}")
+        try:
+            _verified_geometry(st.session_state.extracted)
+        except ValueError as error:
+            st.warning(str(error))
 
 
 def _angle_view(data: pd.DataFrame | None) -> None:
@@ -189,6 +270,11 @@ def _overlay_view(data: pd.DataFrame | None) -> None:
     if data is None or data.empty or not source or not Path(source).exists():
         st.info("Wgraj film i wykonaj ekstrakcję albo wczytaj odpowiadający mu CSV.")
         return
+    try:
+        metadata = _verified_geometry(data)
+    except ValueError as error:
+        st.error(str(error))
+        return
     if not st.checkbox("Pokaż punkty na filmie", key="show_overlay"):
         return
     try:
@@ -196,17 +282,13 @@ def _overlay_view(data: pd.DataFrame | None) -> None:
     except (ValueError, TypeError) as error:
         st.error(str(error))
         return
-    # CSV from outside this session does not contain crop/source provenance.
-    crop = st.selectbox("Kadrowanie użyte podczas ekstrakcji", ["none", "left", "right", "center"],
-                        index=["none", "left", "right", "center"].index(st.session_state.crop_mode),
-                        key="overlay_crop")
-    st.caption("Dla wczytanego CSV ustaw takie samo kadrowanie jak przy ekstrakcji. "
-               "Zgodne wymiary i FPS nie gwarantują, że wybrano właściwy film.")
+    crop = metadata["crop_mode"]
+    st.caption(f"Film zgodny z SHA-256 w CSV. Kadrowanie: {crop}.")
     frame_numbers = rows["frame_number"].tolist()
     frame_number = st.select_slider("Numer klatki (od 0)", options=frame_numbers, key="overlay_frame")
     row = rows.loc[rows["frame_number"] == frame_number].iloc[0]
     try:
-        frame = read_analysis_frame(source, frame_number, crop)
+        frame = read_analysis_frame(source, frame_number, crop, metadata["resize_height"])
         st.image(draw_overlay(frame, row), channels="BGR")
     except (ValueError, RuntimeError, cv2.error) as error:
         st.error(str(error))
@@ -227,10 +309,11 @@ def _overlay_view(data: pd.DataFrame | None) -> None:
         f"{source}|{source_stat.st_size}|{source_stat.st_mtime_ns}|{crop}|{signature_data}".encode()
     ).hexdigest()
     if st.button("Wygeneruj film z punktami", icon=":material/movie:"):
-        output = RESULTS_DIR / "overlays" / f"overlay_{uuid4().hex}.mp4"
+        output = _analysis_directory() / "overlays" / f"overlay_{uuid4().hex}.mp4"
         try:
             with st.spinner("Nakładanie punktów na kolejne klatki..."):
-                export_overlay_video(source, rows, output, crop_mode=crop)
+                export_overlay_video(source, rows, output, crop_mode=crop,
+                                     resize_height=metadata["resize_height"])
             st.session_state.overlay_video = (signature, str(output))
         except (ValueError, RuntimeError, OSError, cv2.error) as error:
             st.error(f"Nie udało się wygenerować filmu: {error}")
@@ -268,7 +351,7 @@ def _selection_view(data: pd.DataFrame | None) -> None:
         try:
             selected = select_reference_frames(data, int(count), start_time_s=start, end_time_s=end)
             st.session_state.selected_frames = selected
-            write_csv(selected, REFERENCE_DIR / "selected_reference_frames.csv")
+            write_csv(selected, _analysis_directory() / "selected_reference_frames.csv")
         except (ValueError, KeyError, TypeError) as error:
             st.session_state.selected_frames = None
             st.error(str(error))
@@ -303,6 +386,11 @@ def _annotation_view() -> None:
     if selected is None or selected.empty or not video_path:
         st.info("Wybierz klatki referencyjne i zachowaj dostęp do filmu źródłowego.")
         return
+    try:
+        metadata = _verified_geometry(selected)
+    except ValueError as error:
+        st.error(str(error))
+        return
     frame_numbers = selected["frame_number"].astype(int).tolist()
     frame_number = st.selectbox("Klatka", frame_numbers, key="annotation_frame")
     annotator_id = st.text_input("Annotator ID", value="annotator_01", key="annotation_annotator")
@@ -314,11 +402,14 @@ def _annotation_view() -> None:
     selected_row = selected.loc[selected["frame_number"] == frame_number].iloc[0]
     try:
         identity = annotation_identity(selected_row, annotator_id, session_id)
-        frame = read_analysis_frame(video_path, frame_number, st.session_state.crop_mode)
+        identity.update({key: metadata[key] for key in PROVENANCE_KEYS})
+        frame = read_analysis_frame(video_path, frame_number, metadata["crop_mode"], metadata["resize_height"])
+        if (frame.shape[1], frame.shape[0]) != (int(selected_row["image_width"]), int(selected_row["image_height"])):
+            raise ValueError("Wymiary obrazu nie odpowiadają klatce ekstrakcji.")
         image_url = _image_data_url(frame)
         image_hash = hashlib.sha256(base64.b64decode(image_url.split(",", 1)[1])).hexdigest()
         component_key = annotation_widget_key(identity, image_hash)
-        path = REFERENCE_DIR / "reference_annotations.csv"
+        path = _analysis_directory() / "reference_annotations.csv"
         existing = read_reference_annotations(path) if path.exists() else pd.DataFrame()
         already_saved = annotation_exists(existing, identity)
     except (ValueError, KeyError, RuntimeError, OSError) as error:
@@ -342,6 +433,7 @@ def _annotation_view() -> None:
                           annotated_at=datetime.now().astimezone().isoformat())
             save_reference_annotation(record, path)
             st.session_state.validation = None
+            st.session_state.summary = None
             st.success("Zapisano anotację bez zastępowania wcześniejszych pomiarów.")
         except (ValueError, KeyError, OSError) as error:
             st.error(str(error))
@@ -352,16 +444,27 @@ def _validation_view(data: pd.DataFrame | None) -> None:
     st.subheader("Walidacja")
     st.caption("Błędy dotyczą zgięcia 2D: MediaPipe − referencja. Dodatni bias oznacza większe zgięcie MediaPipe.")
     reference_upload = st.file_uploader("reference_annotations.csv", type=["csv"], key="reference_csv")
-    reference_path = REFERENCE_DIR / "reference_annotations.csv"
+    if data is None:
+        st.session_state.validation = None
+        st.session_state.summary = None
+        st.info("Najpierw wykonaj lub wczytaj analizę.")
+        return
+    reference_path = _analysis_directory() / "reference_annotations.csv"
     reference = read_reference_annotations(reference_upload) if reference_upload else (read_reference_annotations(reference_path) if reference_path.exists() else None)
     if data is None or reference is None:
+        st.session_state.validation = None
+        st.session_state.summary = None
         st.info("Potrzebne są dane ekstrakcji i anotacje referencyjne.")
         return
     if not {"annotator_id", "annotation_session"}.issubset(reference.columns):
+        st.session_state.validation = None
+        st.session_state.summary = None
         st.error("Referencja musi zawierać anotatora i sesję pomiarową.")
         return
     pairs = list(reference[["annotator_id", "annotation_session"]].drop_duplicates().itertuples(index=False, name=None))
     if not pairs:
+        st.session_state.validation = None
+        st.session_state.summary = None
         st.info("Brak anotacji referencyjnych.")
         return
     pair = st.selectbox("Referencja do porównania (anotator / sesja)", pairs,
@@ -370,16 +473,18 @@ def _validation_view(data: pd.DataFrame | None) -> None:
     reference_signature = hashlib.sha256(reference.to_csv(index=False).encode()).hexdigest()
     if st.session_state.get("validation_reference_signature") != reference_signature:
         st.session_state.validation = None
+        st.session_state.summary = None
         st.session_state.validation_reference_signature = reference_signature
     if st.button("Połącz i oblicz błędy", icon=":material/compare_arrows:"):
         st.session_state.validation = None
+        st.session_state.summary = None
         try:
             validation = merge_with_reference(data, reference, annotator_id=pair[0], session=pair[1])
         except ValueError as error:
             st.error(str(error))
             return
         st.session_state.validation = validation
-        write_csv(validation, RESULTS_DIR / "validation_results.csv")
+        write_csv(validation, _analysis_directory() / "validation_results.csv")
     validation = st.session_state.validation
     if validation is not None:
         st.dataframe(validation[[
@@ -399,7 +504,11 @@ def _statistics_view() -> None:
     validation["visibility_group"] = validation["min_visibility"].map(classify_visibility)
     summary = grouped_statistics(validation, ["video_id", "person_id", "visibility_group"])
     summary["angle_definition"] = "knee_flexion_2d_deg"
-    write_csv(summary, RESULTS_DIR / "summary_statistics.csv")
+    for key in (*PROVENANCE_KEYS, "annotator_id", "annotation_session", "side"):
+        if key in validation and validation[key].nunique() == 1:
+            summary[key] = validation[key].iloc[0]
+    st.session_state.summary = summary
+    write_csv(summary, _analysis_directory() / "summary_statistics.csv")
     st.dataframe(summary, hide_index=True)
     scatter = alt.Chart(validation).mark_circle(size=65).encode(
         x=alt.X("min_visibility:Q", title="Minimalne visibility"),
@@ -420,16 +529,18 @@ def _statistics_view() -> None:
 def _export_view(data: pd.DataFrame | None) -> None:
     """Render all research-data downloads and an HTML summary."""
     st.subheader("Eksport")
+    if data is None:
+        st.info("Brak aktywnej analizy do eksportu.")
+        return
     _download_csv("Punkty MediaPipe", data, "extracted_landmarks.csv")
     _download_csv("Wybrane klatki", st.session_state.selected_frames, "selected_reference_frames.csv")
-    reference_path = REFERENCE_DIR / "reference_annotations.csv"
+    reference_path = _analysis_directory() / "reference_annotations.csv"
     _download_csv("Anotacje referencyjne", read_reference_annotations(reference_path) if reference_path.exists() else None, "reference_annotations.csv")
     _download_csv("Wyniki walidacji", st.session_state.validation, "validation_results.csv")
     if data is not None:
         suspicious = data[data["frame_quality_status"] != "reliable"]
         _download_csv("Podejrzane klatki", suspicious, "suspicious_frames.csv")
-    summary_path = RESULTS_DIR / "summary_statistics.csv"
-    _download_csv("Statystyki", read_csv(summary_path) if summary_path.exists() else None, "summary_statistics.csv")
+    _download_csv("Statystyki", st.session_state.summary, "summary_statistics.csv")
     html = "<h1>Walidacja kąta stawu kolanowego</h1><p>Raport pomiarowy z nagrania bocznego. System nie jest narzędziem medycznym.</p>"
     st.download_button("Podsumowanie HTML", html.encode("utf-8"), "validation_summary.html", "text/html", icon=":material/description:")
 

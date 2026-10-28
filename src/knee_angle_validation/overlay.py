@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .pose_extraction import crop_frame, resize_frame
+from .provenance import PROVENANCE_KEYS, require_source_match, file_sha256
 
 
 POINTS = {"hip": ((255, 160, 60), "Biodro"),
@@ -78,6 +79,10 @@ def export_overlay_video(source: str | Path, data: pd.DataFrame, output: str | P
                          crop_mode: str = "none", resize_height: int = 720) -> Path:
     """Export a silent H.264 CFR preview; preserve source frame order and FPS."""
     rows = validate_overlay_data(data)
+    if set(PROVENANCE_KEYS).intersection(rows.columns):
+        metadata = require_source_match(rows, file_sha256(source))
+        if crop_mode != metadata["crop_mode"] or resize_height != metadata["resize_height"]:
+            raise ValueError("Kadrowanie i skalowanie muszą odpowiadać metadanym ekstrakcji.")
     if not np.array_equal(rows["frame_number"].to_numpy(), np.arange(len(rows))):
         raise ValueError("Eksport filmu wymaga pełnej ekstrakcji od klatki 0, bez luk.")
     output = Path(output)

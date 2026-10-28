@@ -90,7 +90,10 @@ Proponowane kolumny `annotations.csv` (przechowywany poza publicznym repozytoriu
 recording_id,participant_id,near_leg,frame_index,timestamp_s,hip_x,hip_y,hip_quality,knee_x,knee_y,knee_quality,ankle_x,ankle_y,ankle_quality,frame_quality,knee_internal_angle_deg,knee_flexion_deg,annotator_id,annotation_session,notes
 ```
 
-- Współrzędne podawaj w pikselach **oryginalnej klatki**, nie przeskalowanego okna narzędzia anotacyjnego; jeżeli narzędzie zmienia skalę, przelicz współrzędne do rozdzielczości źródłowej.
+- Współrzędne podawaj w pikselach **obrazu analitycznego** użytego przez MediaPipe
+  (to samo kadrowanie i skalowanie), nie okna narzędzia anotacyjnego. Nowe CSV
+  zapisują `analysis_id`, `source_sha256`, `crop_mode` i `resize_height`;
+  aplikacja przenosi je do anotacji i sprawdza zgodność filmu przed wyświetleniem obrazu.
 - Ustal i zapisz, czy obraz był obracany lub odbijany lustrzanie. Anotacja i MediaPipe muszą korzystać z tej samej orientacji.
 - Zachowaj dokładne `frame_index` i `timestamp_s` oraz identyfikator nagrania.
 - Braki zapisuj jako puste wartości / `NaN`, nie jako `0`.

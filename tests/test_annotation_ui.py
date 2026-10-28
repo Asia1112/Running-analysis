@@ -8,6 +8,8 @@ from streamlit.testing.v1 import AppTest
 from src.knee_angle_validation.annotation_storage import read_reference_annotations, save_reference_annotation
 from src.knee_angle_validation.reference_annotation import build_reference_annotation
 
+PROVENANCE = dict(analysis_id='a' * 32, source_sha256='b' * 64, crop_mode='none', resize_height=720)
+
 
 ANNOTATION_SCRIPT = '''
 from pathlib import Path
@@ -16,8 +18,10 @@ from types import SimpleNamespace
 import numpy as np
 import streamlit as st
 import app
-app.REFERENCE_DIR = Path(st.session_state.test_directory)
+app.RESULTS_DIR = Path(st.session_state.test_directory)
 app._initialize_state()
+st.session_state.active_analysis_id = 'a' * 32
+st.session_state.source_sha256 = 'b' * 64
 def component(image, *, points, key, on_points_change):
     st.session_state.rendered_key = key
     st.session_state.rendered_points = [dict(p) for p in points]
@@ -39,7 +43,8 @@ class AnnotationUiTests(unittest.TestCase):
             at.session_state.video_path = 'test.mov'
             at.session_state.annotation_session = 's1'
             at.session_state.selected_frames = pd.DataFrame([
-                dict(video_id='v1', person_id='p1', frame_number=i, side='right') for i in (0, 1)])
+                dict(video_id='v1', person_id='p1', frame_number=i, side='right',
+                     image_width=160, image_height=160, **PROVENANCE) for i in (0, 1)])
             at.run()
             self.assertFalse(at.exception)
             first_key = at.session_state.rendered_key
@@ -67,7 +72,7 @@ class AnnotationUiTests(unittest.TestCase):
             at.button(key='save_annotation').click().run()
             self.assertFalse(at.exception)
             from pathlib import Path
-            saved = read_reference_annotations(Path(directory) / 'reference_annotations.csv')
+            saved = read_reference_annotations(Path(directory) / 'analyses' / ('a' * 32) / 'reference_annotations.csv')
             self.assertEqual(saved.annotation_session.tolist(), ['s1', 's2'])
             self.assertEqual(saved.hip_x_ref.tolist(), [10., 20.])
             self.assertTrue(saved.frame_image_sha256.str.len().eq(64).all())
@@ -85,6 +90,7 @@ import app
 app.REFERENCE_DIR = Path(st.session_state.test_directory)
 app.RESULTS_DIR = Path(st.session_state.test_directory)
 app._initialize_state()
+st.session_state.active_analysis_id = 'a' * 32
 app._validation_view(st.session_state.test_data)
 '''
         with tempfile.TemporaryDirectory() as directory:
@@ -92,7 +98,7 @@ app._validation_view(st.session_state.test_data)
             points = [(0.,0.), (0.,10.), (10.,10.)]
             for session in ('s1', 's2'):
                 save_reference_annotation(build_reference_annotation(frame, points, 'a1', session),
-                                          Path(directory) / 'reference_annotations.csv')
+                                          Path(directory) / 'analyses' / ('a' * 32) / 'reference_annotations.csv')
             at = AppTest.from_string(script, default_timeout=30)
             at.session_state.test_directory = directory
             at.session_state.test_data = pd.DataFrame([{**frame.to_dict(),
@@ -107,7 +113,7 @@ app._validation_view(st.session_state.test_data)
             at.button[0].click().run()
             self.assertFalse(at.exception)
             self.assertEqual(at.session_state.validation.annotation_session.tolist(), ['s2'])
-            output = Path(directory) / 'validation_results.csv'
+            output = Path(directory) / 'analyses' / ('a' * 32) / 'validation_results.csv'
             previous = output.read_bytes()
             at.session_state.test_data = pd.concat([at.session_state.test_data] * 2)
             at.button[0].click().run()

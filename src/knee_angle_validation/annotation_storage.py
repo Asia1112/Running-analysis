@@ -8,6 +8,7 @@ from tempfile import NamedTemporaryFile
 
 import numpy as np
 import pandas as pd
+from .provenance import PROVENANCE_KEYS, recording_metadata
 
 
 ANNOTATION_KEYS = ["video_id", "person_id", "frame_number", "side", "annotator_id", "annotation_session"]
@@ -33,13 +34,13 @@ def annotation_identity(frame: object, annotator_id: str, session: str) -> dict[
 
 def annotation_widget_key(identity: dict[str, object], image_sha256: str) -> str:
     """Keep drafts separate by all identity fields and the exact displayed image."""
-    payload = [identity[key] for key in ANNOTATION_KEYS] + [image_sha256]
+    payload = [identity[key] for key in ANNOTATION_KEYS] + [identity.get(key) for key in PROVENANCE_KEYS] + [image_sha256]
     return "annotation_" + hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
 
 
 def read_reference_annotations(source: object) -> pd.DataFrame:
     """Preserve textual IDs such as session '001' when reading CSV."""
-    return pd.read_csv(source, dtype={key: str for key in TEXT_KEYS}, keep_default_na=False)
+    return pd.read_csv(source, dtype={key: str for key in [*TEXT_KEYS, "analysis_id", "source_sha256"]}, keep_default_na=False)
 
 
 def annotation_exists(data: pd.DataFrame, identity: dict[str, object]) -> bool:
@@ -94,6 +95,10 @@ def save_reference_annotation(record: dict[str, object], path: str | Path) -> Pa
     try:
         handle.close()
         existing = read_reference_annotations(output) if output.exists() else pd.DataFrame()
+        if not existing.empty and (set(PROVENANCE_KEYS).intersection(existing.columns) or
+                                   set(PROVENANCE_KEYS).intersection(record)):
+            if recording_metadata(existing) != recording_metadata(pd.DataFrame([record])):
+                raise ValueError("Plik anotacji dotyczy innej analizy lub geometrii obrazu.")
         if annotation_exists(existing, identity):
             raise ValueError("Ta klatka jest już zapisana w tej sesji. Utwórz nową sesję, aby wykonać kolejny pomiar.")
         if not existing.empty and existing.duplicated(ANNOTATION_KEYS).any():

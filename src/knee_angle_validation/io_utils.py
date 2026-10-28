@@ -24,4 +24,4 @@ def write_csv(data: pd.DataFrame, path: str | Path) -> Path:
 
 def read_csv(path: str | Path) -> pd.DataFrame:
     """Read a UTF-8 CSV into a DataFrame."""
-    return pd.read_csv(path)
+    return pd.read_csv(path, dtype={"video_id": str, "person_id": str, "analysis_id": str, "source_sha256": str})

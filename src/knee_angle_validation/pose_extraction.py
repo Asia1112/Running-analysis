@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
+from datetime import datetime, timezone
 
 import cv2
 import mediapipe as mp
@@ -11,9 +13,9 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 from .frame_quality import add_quality_columns
-from .io_utils import write_csv
 from .knee_angle import add_pixel_angle_columns
 from .smoothing import smooth_series
+from .provenance import file_sha256, new_analysis_id, recording_metadata
 
 
 SIDE_INDEXES = {
@@ -100,12 +102,20 @@ def process_video(
     resize_height: int = 720,
     smoothing_method: str = "median",
     smoothing_window: int = 5,
+    analysis_id: str | None = None,
 ) -> ExtractionResult:
     """Extract selected-side hip, knee, ankle points and write canonical CSV data."""
     if side not in SIDE_INDEXES:
         raise ValueError("side must be 'left' or 'right'")
     if not Path(model_path).exists():
         raise FileNotFoundError(f"MediaPipe model not found: {model_path}")
+    if Path(output_csv).exists() or Path(output_csv).with_suffix(".metadata.json").exists():
+        raise ValueError("Wyniki już istnieją. Wybierz nową ścieżkę dla kolejnej analizy.")
+    provenance = {"analysis_id": analysis_id or new_analysis_id(),
+                  "source_sha256": file_sha256(source), "crop_mode": crop_mode,
+                  "resize_height": resize_height, "video_id": str(video_id).strip(),
+                  "person_id": str(person_id).strip(), "side": side}
+    provenance = recording_metadata(pd.DataFrame([provenance]))
 
     options = vision.PoseLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path=str(model_path)),
@@ -157,13 +167,26 @@ def process_video(
     data = pd.DataFrame(rows)
     if data.empty:
         raise RuntimeError("The source video contains no readable frames")
+    for key, value in provenance.items():
+        data[key] = value
     data = add_pixel_angle_columns(data)
     data["knee_angle_smoothed"] = smooth_series(
         data["knee_angle_raw"].to_numpy(), smoothing_method, smoothing_window
     )
     data["knee_flexion_smoothed_deg"] = 180.0 - data["knee_angle_smoothed"]
     data = add_quality_columns(data)
-    csv_path = write_csv(data, output_csv)
+    csv_path = Path(output_csv)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("x", encoding="utf-8", newline="") as stream:
+        data.to_csv(stream, index=False)
+    metadata = {**provenance, "source_name": Path(source).name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "model_sha256": file_sha256(model_path), "model_name": Path(model_path).name,
+                "fps": fps, "frames": len(data),
+                "image_width": int(data.image_width.iloc[0]), "image_height": int(data.image_height.iloc[0]),
+                "smoothing_method": smoothing_method, "smoothing_window": smoothing_window}
+    with csv_path.with_suffix(".metadata.json").open("x", encoding="utf-8") as stream:
+        json.dump(metadata, stream, ensure_ascii=False, indent=2)
     return ExtractionResult(
         data=data,
         csv_path=csv_path,
