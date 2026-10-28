@@ -13,13 +13,16 @@ import pandas as pd
 import streamlit as st
 
 from src.knee_angle_validation.annotation_component import annotate_image
+from src.knee_angle_validation.annotation_storage import (
+    annotation_exists, annotation_identity, annotation_widget_key,
+    read_reference_annotations, save_reference_annotation,
+)
 from src.knee_angle_validation.frame_quality import add_quality_columns, classify_visibility, detect_angle_jumps
 from src.knee_angle_validation.knee_angle import add_pixel_angle_columns
 from src.knee_angle_validation.io_utils import read_csv, write_csv
 from src.knee_angle_validation.pose_extraction import process_video, read_analysis_frame
 from src.knee_angle_validation.overlay import draw_overlay, export_overlay_video, validate_overlay_data
 from src.knee_angle_validation.reference_annotation import (
-    REFERENCE_COLUMNS,
     build_reference_annotation,
     select_reference_frames,
 )
@@ -42,6 +45,8 @@ def _initialize_state() -> None:
     defaults = {
         "extracted": None, "selected_frames": None, "validation": None,
         "video_path": None, "crop_mode": "none", "side": "left",
+        "annotation_drafts": {},
+        "annotation_session": f"session_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -57,10 +62,10 @@ def _uploaded_path(uploaded_file: object) -> Path:
 
 def _image_data_url(frame: np.ndarray) -> str:
     """Encode an OpenCV frame for the inline annotation component."""
-    ok, encoded = cv2.imencode(".jpg", frame)
+    ok, encoded = cv2.imencode(".png", frame)
     if not ok:
         raise RuntimeError("Cannot encode annotation frame")
-    return "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii")
+    return "data:image/png;base64," + base64.b64encode(encoded).decode("ascii")
 
 
 def _download_csv(label: str, data: pd.DataFrame | None, filename: str) -> None:
@@ -282,6 +287,14 @@ def _selection_view(data: pd.DataFrame | None) -> None:
                                "selection_time_error_s", "selection_start_s", "selection_end_s"]], hide_index=True)
 
 
+def _remember_annotation_points(component_key: str) -> None:
+    """Copy component events into a draft that survives widget cleanup."""
+    state = st.session_state.get(component_key, {})
+    points = state.get("points", []) or []
+    draft = st.session_state.annotation_drafts.setdefault(component_key, {"points": [], "notes": ""})
+    draft["points"] = [dict(point) for point in points]
+
+
 def _annotation_view() -> None:
     """Render unbiased manual annotation and persist reference records."""
     st.subheader("Ręczna anotacja")
@@ -291,29 +304,47 @@ def _annotation_view() -> None:
         st.info("Wybierz klatki referencyjne i zachowaj dostęp do filmu źródłowego.")
         return
     frame_numbers = selected["frame_number"].astype(int).tolist()
-    frame_number = st.selectbox("Klatka", frame_numbers)
-    annotator_id = st.text_input("Annotator ID", value="annotator_01")
-    session_id = st.text_input("Sesja", value=datetime.now().strftime("%Y%m%d"))
-    frame = read_analysis_frame(video_path, frame_number, st.session_state.crop_mode)
-    component_key = f"annotation_{selected.iloc[0]['video_id']}_{frame_number}"
-    result = annotate_image(_image_data_url(frame), key=component_key)
-    points = getattr(result, "points", None) or []
-    notes = st.text_input("Notatki", key=f"notes_{frame_number}")
-    if st.button("Zapisz anotację", icon=":material/save:", disabled=len(points) != 3):
-        selected_row = selected.loc[selected["frame_number"] == frame_number].iloc[0]
-        coordinates = [(float(point["x"]), float(point["y"])) for point in points]
-        record = build_reference_annotation(selected_row, coordinates, annotator_id, session_id, notes)
+    frame_number = st.selectbox("Klatka", frame_numbers, key="annotation_frame")
+    annotator_id = st.text_input("Annotator ID", value="annotator_01", key="annotation_annotator")
+    if st.button("Nowa sesja pomiarowa", key="new_annotation_session"):
+        st.session_state.annotation_session = f"session_{datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:8]}"
+    session_id = st.text_input("Sesja", key="annotation_session")
+    st.caption("Do powtórnego pomiaru użyj nowej sesji. Poprzednie punkty nie są w niej wyświetlane. "
+               "Szkice punktów przetrwają zmianę klatki w bieżącym połączeniu; zapis CSV zachowuje pomiary trwale.")
+    selected_row = selected.loc[selected["frame_number"] == frame_number].iloc[0]
+    try:
+        identity = annotation_identity(selected_row, annotator_id, session_id)
+        frame = read_analysis_frame(video_path, frame_number, st.session_state.crop_mode)
+        image_url = _image_data_url(frame)
+        image_hash = hashlib.sha256(base64.b64decode(image_url.split(",", 1)[1])).hexdigest()
+        component_key = annotation_widget_key(identity, image_hash)
         path = REFERENCE_DIR / "reference_annotations.csv"
-        existing = read_csv(path) if path.exists() else pd.DataFrame(columns=REFERENCE_COLUMNS)
-        key_mask = (
-            (existing.get("video_id") == record["video_id"]) &
-            (existing.get("frame_number") == record["frame_number"]) &
-            (existing.get("side") == record["side"]) &
-            (existing.get("annotator_id") == record["annotator_id"])
-        ) if not existing.empty else pd.Series(dtype=bool)
-        existing = existing.loc[~key_mask] if not existing.empty else existing
-        write_csv(pd.concat([existing, pd.DataFrame([record])], ignore_index=True), path)
-        st.success(f"Zapisano referencyjne zgięcie kolana {record['knee_flexion_deg']:.2f}°.")
+        existing = read_reference_annotations(path) if path.exists() else pd.DataFrame()
+        already_saved = annotation_exists(existing, identity)
+    except (ValueError, KeyError, RuntimeError, OSError) as error:
+        st.error(str(error))
+        return
+    draft = st.session_state.annotation_drafts.setdefault(component_key, {"points": [], "notes": ""})
+    annotate_image(image_url, points=draft["points"], key=component_key,
+                   on_points_change=lambda: _remember_annotation_points(component_key))
+    points = draft["points"]
+    st.caption(f"Zaznaczono {len(points)}/3 punktów.")
+    notes = st.text_input("Notatki", value=draft["notes"], key=f"notes_{component_key}")
+    draft["notes"] = notes
+    if already_saved:
+        st.info("Ta klatka jest już zapisana dla tego anotatora i sesji. Kolejny pomiar wymaga nowej sesji.")
+    if st.button("Zapisz anotację", icon=":material/save:", key="save_annotation",
+                 disabled=len(points) != 3 or already_saved):
+        try:
+            coordinates = [(float(point["x"]), float(point["y"])) for point in points]
+            record = build_reference_annotation(selected_row, coordinates, annotator_id, session_id, notes)
+            record.update(frame_image_sha256=image_hash, image_width=frame.shape[1], image_height=frame.shape[0],
+                          annotated_at=datetime.now().astimezone().isoformat())
+            save_reference_annotation(record, path)
+            st.session_state.validation = None
+            st.success("Zapisano anotację bez zastępowania wcześniejszych pomiarów.")
+        except (ValueError, KeyError, OSError) as error:
+            st.error(str(error))
 
 
 def _validation_view(data: pd.DataFrame | None) -> None:
@@ -322,10 +353,24 @@ def _validation_view(data: pd.DataFrame | None) -> None:
     st.caption("Błędy dotyczą zgięcia 2D: MediaPipe − referencja. Dodatni bias oznacza większe zgięcie MediaPipe.")
     reference_upload = st.file_uploader("reference_annotations.csv", type=["csv"], key="reference_csv")
     reference_path = REFERENCE_DIR / "reference_annotations.csv"
-    reference = pd.read_csv(reference_upload) if reference_upload else (read_csv(reference_path) if reference_path.exists() else None)
+    reference = read_reference_annotations(reference_upload) if reference_upload else (read_reference_annotations(reference_path) if reference_path.exists() else None)
     if data is None or reference is None:
         st.info("Potrzebne są dane ekstrakcji i anotacje referencyjne.")
         return
+    if not {"annotator_id", "annotation_session"}.issubset(reference.columns):
+        st.error("Referencja musi zawierać anotatora i sesję pomiarową.")
+        return
+    pairs = list(reference[["annotator_id", "annotation_session"]].drop_duplicates().itertuples(index=False, name=None))
+    if not pairs:
+        st.info("Brak anotacji referencyjnych.")
+        return
+    pair = st.selectbox("Referencja do porównania (anotator / sesja)", pairs,
+                        format_func=lambda item: f"{item[0]} / {item[1]}", key="validation_session")
+    reference = reference.loc[reference.annotator_id.eq(pair[0]) & reference.annotation_session.eq(pair[1])]
+    reference_signature = hashlib.sha256(reference.to_csv(index=False).encode()).hexdigest()
+    if st.session_state.get("validation_reference_signature") != reference_signature:
+        st.session_state.validation = None
+        st.session_state.validation_reference_signature = reference_signature
     if st.button("Połącz i oblicz błędy", icon=":material/compare_arrows:"):
         validation = merge_with_reference(data, reference)
         st.session_state.validation = validation
@@ -373,7 +418,7 @@ def _export_view(data: pd.DataFrame | None) -> None:
     _download_csv("Punkty MediaPipe", data, "extracted_landmarks.csv")
     _download_csv("Wybrane klatki", st.session_state.selected_frames, "selected_reference_frames.csv")
     reference_path = REFERENCE_DIR / "reference_annotations.csv"
-    _download_csv("Anotacje referencyjne", read_csv(reference_path) if reference_path.exists() else None, "reference_annotations.csv")
+    _download_csv("Anotacje referencyjne", read_reference_annotations(reference_path) if reference_path.exists() else None, "reference_annotations.csv")
     _download_csv("Wyniki walidacji", st.session_state.validation, "validation_results.csv")
     if data is not None:
         suspicious = data[data["frame_quality_status"] != "reliable"]

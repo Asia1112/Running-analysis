@@ -10,7 +10,7 @@ _ANNOTATOR = st.components.v2.component(
     html="""
 <div class="toolbar">
   <strong id="status">Biodro (1/3)</strong>
-  <div><button id="undo" type="button" title="Cofnij">↶</button><button id="reset" type="button" title="Wyczyść">×</button></div>
+  <div><button id="undo" type="button" title="Cofnij" aria-label="Cofnij punkt">↶</button><button id="reset" type="button" title="Wyczyść" aria-label="Wyczyść punkty">×</button></div>
 </div>
 <div class="stage"><img id="frame" alt="Klatka do anotacji"><canvas id="overlay"></canvas></div>
 """,
@@ -31,7 +31,7 @@ export default function(component) {
   const undo = parentElement.querySelector('#undo')
   const reset = parentElement.querySelector('#reset')
   const labels = ['Biodro', 'Kolano', 'Kostka']
-  let points = Array.isArray(data.points) ? data.points.slice(0, 3) : []
+   let points = Array.isArray(data.points) ? data.points.slice(0, 3).map(p => ({...p})) : []
 
   function draw() {
     const rect = image.getBoundingClientRect()
@@ -58,12 +58,13 @@ export default function(component) {
   if (image.src !== data.image) image.src = data.image
   else draw()
   canvas.onclick = (event) => {
-    if (points.length >= 3) return
+    if (points.length >= 3 || !image.naturalWidth) return
     const rect = canvas.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
     points.push({x:(event.clientX-rect.left)*image.naturalWidth/rect.width, y:(event.clientY-rect.top)*image.naturalHeight/rect.height})
-    setStateValue('points', points); draw()
+    setStateValue('points', points.map(p => ({...p}))); draw()
   }
-  undo.onclick = () => { points.pop(); setStateValue('points', points); draw() }
+  undo.onclick = () => { points.pop(); setStateValue('points', points.map(p => ({...p}))); draw() }
   reset.onclick = () => { points = []; setStateValue('points', points); draw() }
   const observer = new ResizeObserver(draw); observer.observe(image)
   return () => observer.disconnect()
@@ -80,6 +81,9 @@ def annotate_image(
     on_points_change: Callable[[], None] | None = None,
 ) -> object:
     """Mount the reference annotator and return its component state."""
+    if points is None:
+        state = st.session_state.get(key, {})
+        points = state.get("points", [])
     return _ANNOTATOR(
         data={"image": image_data_url, "points": points or []},
         key=key,

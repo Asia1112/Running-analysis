@@ -87,7 +87,7 @@ Klatka otrzymuje `frame_quality = CLEAR`, gdy wszystkie trzy punkty mają `CLEAR
 Proponowane kolumny `annotations.csv` (przechowywany poza publicznym repozytorium):
 
 ```csv
-recording_id,participant_id,near_leg,frame_index,timestamp_s,hip_x,hip_y,hip_quality,knee_x,knee_y,knee_quality,ankle_x,ankle_y,ankle_quality,frame_quality,knee_internal_angle_deg,knee_flexion_deg,annotator_id,notes
+recording_id,participant_id,near_leg,frame_index,timestamp_s,hip_x,hip_y,hip_quality,knee_x,knee_y,knee_quality,ankle_x,ankle_y,ankle_quality,frame_quality,knee_internal_angle_deg,knee_flexion_deg,annotator_id,annotation_session,notes
 ```
 
 - Współrzędne podawaj w pikselach **oryginalnej klatki**, nie przeskalowanego okna narzędzia anotacyjnego; jeżeli narzędzie zmienia skalę, przelicz współrzędne do rozdzielczości źródłowej.
@@ -110,6 +110,10 @@ recording_id,participant_id,near_leg,frame_index,timestamp_s,hip_x,hip_y,hip_qua
 
 - Pilotaż: oznacz 30 klatek jednego nagrania i sprawdź spójność oraz czas pracy.
 - Zalecane: powtórz anotację części klatek po przerwie lub z udziałem drugiego anotatora, aby oszacować powtarzalność referencji.
+- Każde powtórzenie zapisuj w nowej `annotation_session`; nie zastępuj pierwszego
+  pomiaru. W aplikacji użyj „Nowa sesja pomiarowa”. W nowej sesji nie podglądaj
+  wcześniejszych punktów ani notatek. Do podstawowej walidacji wybierz jedną
+  sesję referencyjną i jednego anotatora; pozostałe zachowaj do oceny powtarzalności.
 - Porównuj **identyczne klatki, tę samą nogę i tę samą konwencję kąta**.
 - Dla par z dostępnymi wartościami licz błąd `MediaPipe - reference`, MAE, RMSE i bias; podawaj liczbę porównanych i wykluczonych klatek.
 - Rozdziel wyniki według nagrania i prędkości; pamiętaj, że kolejne klatki jednego uczestnika nie są niezależnymi obserwacjami osobowymi.

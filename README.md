@@ -35,6 +35,7 @@ pose_run/
     smoothing.py               filtry sygnału
     frame_quality.py           heurystyki jakości klatek
     reference_annotation.py    wybór klatek i rekord anotacji
+    annotation_storage.py      bezpieczny zapis sesji bez zastępowania pomiarów
     annotation_component.py    klikalna anotacja Streamlit
     validation.py              łączenie danych i obliczanie błędów
     statistics.py              statystyki opisowe
@@ -204,7 +205,42 @@ W widoku anotacji wyświetlany jest obraz bez punktów MediaPipe. Anotator wskaz
 biodro, kolano i kostkę; może cofnąć lub wyczyścić zaznaczenia. Odcinki są
 rysowane dopiero po wybraniu wszystkich trzech punktów.
 
-## Ograniczenia
+## Sesje anotacji i powtórne pomiary
+
+W zakładce „Ręczna anotacja” wybierz anotatora i identyfikator sesji.
+Przycisk „Nowa sesja pomiarowa” tworzy unikalny identyfikator, także przy
+kilku sesjach tego samego dnia. Nowa sesja zaczyna się bez wcześniejszych
+punktów i notatek. Powrót do rozpoczętej sesji i klatki przywraca jej szkic
+w bieżącym połączeniu Streamlit; po zamknięciu połączenia niezapisany szkic
+może zostać utracony. Do trwałego zachowania pomiaru użyj „Zapisz anotację”.
+
+Zapis dopisuje rekord z pełnym kluczem:
+`video_id, person_id, frame_number, side, annotator_id, annotation_session`.
+Nie zastępuje istniejącego pomiaru o takim samym kluczu — kolejny pomiar lub
+korekta wymaga nowej sesji. Zapis odbywa się atomowo, a blokada pliku zapobiega
+równoczesnym zapisom. Błąd zapisu nie powinien zastąpić poprzedniego CSV.
+Jeżeli proces zostanie przerwany i pozostawi plik `.lock`, przed jego ręcznym
+usunięciem sprawdź, że żaden zapis nie jest w toku.
+
+Anotacje zawierają również datę zapisu, wymiary obrazu i SHA-256 wyświetlanego
+PNG. Klucz szkicu uwzględnia cały klucz pomiaru i obraz, więc punkty nie są
+przenoszone między stronami, osobami, sesjami ani wersjami obrazu.
+Obraz anotacyjny jest PNG bez punktów MediaPipe. Punkty są przeliczane
+z rozmiaru wyświetlanego obrazu na jego pełną rozdzielczość.
+
+W zakładce „Walidacja” wybierz **jednego anotatora i jedną sesję** referencyjną.
+Zmiana referencji unieważnia poprzedni wynik w sesji aplikacji. W CLI przy
+wielu sesjach podaj `--annotator-id annotator_01 --session IDENTYFIKATOR`;
+bez jednoznacznego wyboru program zatrzyma się przed zapisaniem wyników.
+Nie traktujemy powtórnych anotacji jako dodatkowych niezależnych klatek.
+
+Testy Python obejmują zachowanie sesji, ochronę przed zastąpieniem wpisu,
+awarię zapisu i przepływ stanu Streamlit. Testy JavaScript można uruchomić
+poleceniem `node --test tests/test_annotation_component.mjs` — sprawdzają
+kliknięcia, odtwarzanie stanu, cofanie, czyszczenie i skalowanie na imitacji DOM.
+Nie zastępują testu układu i interakcji w rzeczywistej przeglądarce.
+
+## Ograniczenia badania
 
 - Analiza jest dwuwymiarowa i dotyczy wyłącznie widoku bocznego.
 - Perspektywa, obrót kończyny i zasłonięcia mogą zmieniać wynik.
@@ -223,12 +259,13 @@ badaniem pozostają m.in. następujące problemy wykryte podczas przeglądu:
   osobno kąt wewnętrzny i zgięcie kolana. Wykresy i walidacja używają zgięcia.
 - Wybór klatek jest czasowy i niezależny od wyników modelu; usunięto wcześniejszy
   algorytm warstwowy powodujący błąd indeksów.
-- Zapis anotacji nie uwzględnia sesji w kluczu zastępowania poprzedniego wpisu.
+- Poprawiono zapis sesji: rekordy są dopisywane, a powtórzenie tego samego
+  klucza jest blokowane bez zastępowania wcześniejszego pomiaru.
 - Aplikacja używa wspólnych nazw filmów i wyników; trzeba powiązać stan i zapis
   z identyfikatorem nagrania oraz przebiegu analizy.
 - Należy zweryfikować synchronizację punktów komponentu anotacyjnego,
   rzeczywiste czasy i orientację klatek oraz obsługę brakujących danych.
 
 Podstawowe testy jednostkowe nie potwierdzają jeszcze poprawności całego
-procesu badawczego. Kolejny etap powinien zacząć się od geometrii kąta
-i bezpiecznego powiązania danych z nagraniem.
+procesu badawczego. Kolejne etapy powinny objąć bezpieczne powiązanie danych
+z nagraniem, kontrolę łączenia rekordów i obsługę brakujących danych.

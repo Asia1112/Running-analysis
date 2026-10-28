@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .knee_angle import calculate_knee_angle
+from .annotation_storage import annotation_identity
 
 
 REFERENCE_COLUMNS = [
@@ -89,12 +90,13 @@ def build_reference_annotation(
     """Build one reference record from ordered hip, knee, and ankle clicks."""
     if len(points) != 3:
         raise ValueError("Exactly three points are required: hip, knee, ankle")
+    identity = annotation_identity(frame, annotator_id, annotation_session)
     hip, knee, ankle = points
     internal = calculate_knee_angle(hip, knee, ankle)
+    if not np.isfinite(internal):
+        raise ValueError("Nie można obliczyć kąta z zaznaczonych punktów.")
     return {
-        "video_id": frame["video_id"], "person_id": frame["person_id"],
-        "frame_number": int(frame["frame_number"]), "side": frame["side"],
-        "annotator_id": annotator_id, "annotation_session": annotation_session,
+        **identity,
         "hip_x_ref": hip[0], "hip_y_ref": hip[1],
         "knee_x_ref": knee[0], "knee_y_ref": knee[1],
         "ankle_x_ref": ankle[0], "ankle_y_ref": ankle[1],
