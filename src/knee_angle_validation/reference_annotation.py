@@ -5,7 +5,6 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-from .frame_quality import classify_visibility
 from .knee_angle import calculate_knee_angle
 
 
@@ -17,36 +16,67 @@ REFERENCE_COLUMNS = [
 ]
 
 
-def select_reference_frames(data: pd.DataFrame, count: int, random_state: int = 42) -> pd.DataFrame:
-    """Select diverse frames stratified by visibility and knee-angle terciles."""
-    if count < 1:
-        raise ValueError("count must be positive")
-    candidates = data.loc[data["pose_found"].astype(bool) & data["knee_angle_raw"].notna()].copy()
+def select_reference_frames(
+    data: pd.DataFrame,
+    count: int = 30,
+    *,
+    start_time_s: float | None = None,
+    end_time_s: float | None = None,
+) -> pd.DataFrame:
+    """Choose nearest frames to equal-time-bin midpoints, without model scores.
+
+    Use the supplied time_s values (including irregular timestamps). At a tie
+    choose the earlier frame. When targets map to the same frame, retain only
+    its closest target (earlier target at a tie); do not substitute other frames.
+    Thus a short/sparse recording may yield fewer than count unique frames.
+    """
+    if isinstance(count, bool) or not isinstance(count, (int, np.integer)) or count < 1:
+        raise ValueError("Liczba znaczników musi być dodatnią liczbą całkowitą.")
+    if data.empty or not {"frame_number", "time_s"}.issubset(data.columns):
+        raise ValueError("Wymagane są klatki z kolumnami frame_number i time_s.")
+    for key in ("video_id", "person_id", "side"):
+        if key in data and (data[key].isna().any() or data[key].nunique() != 1):
+            raise ValueError(f"Wybieraj klatki osobno dla jednego {key}.")
+    candidates = data.copy()
+    for key in ("frame_number", "time_s"):
+        values = pd.to_numeric(candidates[key], errors="raise").to_numpy(dtype=float)
+        if not np.isfinite(values).all() or (values < 0).any():
+            raise ValueError(f"Kolumna {key} musi zawierać skończone, nieujemne wartości.")
+        if key == "frame_number" and (values != np.floor(values)).any():
+            raise ValueError("Numery klatek muszą być całkowite.")
+        candidates[key] = values.astype(int) if key == "frame_number" else values
+    if candidates["frame_number"].duplicated().any():
+        raise ValueError("Numery klatek nie mogą się powtarzać.")
+    candidates = candidates.sort_values("frame_number").reset_index(drop=True)
+    times = candidates["time_s"].to_numpy()
+    if (np.diff(times) <= 0).any():
+        raise ValueError("Czasy klatek muszą rosnąć wraz z numerami klatek.")
+    start = float(times[0] if start_time_s is None else start_time_s)
+    end = float(times[-1] if end_time_s is None else end_time_s)
+    if not np.isfinite([start, end]).all() or not times[0] <= start <= end <= times[-1]:
+        raise ValueError("Zakres czasu musi mieścić się w nagraniu; początek nie może być późniejszy niż koniec.")
+    candidates = candidates.loc[candidates["time_s"].between(start, end)].reset_index(drop=True)
     if candidates.empty:
-        return candidates
-    candidates["visibility_group"] = candidates["min_visibility"].map(classify_visibility)
-    ranks = candidates["knee_angle_raw"].rank(method="first")
-    candidates["angle_group"] = pd.qcut(ranks, q=min(3, len(candidates)), labels=False, duplicates="drop")
-    candidates["stratum"] = candidates["visibility_group"].astype(str) + ":" + candidates["angle_group"].astype(str)
-    groups = list(candidates.groupby("stratum", sort=True))
-    selected: list[pd.DataFrame] = []
-    remaining = count
-    rng = np.random.default_rng(random_state)
-    while remaining and groups:
-        next_groups = []
-        for _, group in groups:
-            if remaining == 0:
-                break
-            unused = group.drop(index=pd.concat(selected).index if selected else [])
-            if unused.empty:
-                continue
-            index = rng.choice(unused.index.to_numpy())
-            selected.append(unused.loc[[index]])
-            remaining -= 1
-            if len(unused) > 1:
-                next_groups.append(("", unused.drop(index=index)))
-        groups = next_groups
-    return pd.concat(selected).sort_values("frame_number").head(count).reset_index(drop=True)
+        raise ValueError("W wybranym zakresie czasu nie ma klatek.")
+    times = candidates["time_s"].to_numpy()
+    targets = start + (np.arange(count) + 0.5) * ((end - start) / count)
+    right = np.clip(np.searchsorted(times, targets), 0, len(times) - 1)
+    left = np.maximum(right - 1, 0)
+    left_distance, right_distance = np.abs(times[left] - targets), np.abs(times[right] - targets)
+    positions = np.where((left_distance <= right_distance) |
+                         np.isclose(left_distance, right_distance, atol=1e-12, rtol=0), left, right)
+    selected = candidates.iloc[positions].copy()
+    selected["selection_index"] = np.arange(1, count + 1)
+    selected["selection_target_time_s"] = targets
+    selected["selection_time_error_s"] = selected["time_s"].to_numpy() - targets
+    selected["_distance"] = np.abs(selected["selection_time_error_s"])
+    selected = selected.sort_values("_distance", kind="stable").drop_duplicates("frame_number")
+    selected = selected.drop(columns="_distance").sort_values("frame_number").reset_index(drop=True)
+    selected["selection_method"] = "time_bin_midpoints_v1"
+    selected["selection_requested_count"] = count
+    selected["selection_start_s"] = start
+    selected["selection_end_s"] = end
+    return selected
 
 
 def build_reference_annotation(

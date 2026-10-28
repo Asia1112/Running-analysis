@@ -179,8 +179,28 @@ bezpośrednia miara dokładności punktu.
 
 ## Anotacja referencyjna
 
-Klatki są wybierane warstwowo względem visibility i zakresu kąta. W widoku
-anotacji wyświetlany jest obraz bez punktów MediaPipe. Anotator wskazuje kolejno
+Próba główna jest wybierana wyłącznie według czasu, niezależnie od kąta,
+visibility i powodzenia detekcji MediaPipe. Domyślnie wyznaczanych jest
+30 środków równych przedziałów w zakresie wskazanym w zakładce „Wybór klatek”.
+Dla każdego znacznika wybierana jest najbliższa klatka z tego zakresu;
+przy remisie wybierana jest wcześniejsza. Numery klatek i ich czasy pozostają
+źródłowe, bez przenumerowania po wybraniu fragmentu.
+
+Jeżeli kilka znaczników wskazuje tę samą klatkę, zachowywana jest jedna
+obserwacja z najbliższym znacznikiem (wcześniejszym przy remisie). Nie dobieramy
+zastępczych klatek. Dla bardzo krótkiego lub rzadko próbkowanego fragmentu
+wynik może zawierać mniej niż 30 klatek — aplikacja pokazuje ostrzeżenie.
+Także klatki bez pozy, z NaN kąta lub niskim visibility pozostają w próbie.
+
+`selected_reference_frames.csv` zachowuje dane źródłowe oraz pola
+`selection_method`, `selection_index`, `selection_target_time_s`,
+`selection_time_error_s` (czas klatki minus znacznik),
+`selection_requested_count`, `selection_start_s` i `selection_end_s`.
+Wybór jest deterministyczny i nie wymaga ziarna losowania. Algorytm korzysta
+z `time_s` w CSV, także przy nierównych odstępach; nie zastępuje to jeszcze
+odczytu rzeczywistych znaczników VFR podczas ekstrakcji.
+
+W widoku anotacji wyświetlany jest obraz bez punktów MediaPipe. Anotator wskazuje kolejno
 biodro, kolano i kostkę; może cofnąć lub wyczyścić zaznaczenia. Odcinki są
 rysowane dopiero po wybraniu wszystkich trzech punktów.
 
@@ -201,7 +221,8 @@ badaniem pozostają m.in. następujące problemy wykryte podczas przeglądu:
 
 - Poprawiono geometrię: ekstrakcja i referencja używają pikseli; zapisywane są
   osobno kąt wewnętrzny i zgięcie kolana. Wykresy i walidacja używają zgięcia.
-- Wybór klatek z wielu warstw może zakończyć się błędem usuwania indeksów.
+- Wybór klatek jest czasowy i niezależny od wyników modelu; usunięto wcześniejszy
+  algorytm warstwowy powodujący błąd indeksów.
 - Zapis anotacji nie uwzględnia sesji w kluczu zastępowania poprzedniego wpisu.
 - Aplikacja używa wspólnych nazw filmów i wyników; trzeba powiązać stan i zapis
   z identyfikatorem nagrania oraz przebiegu analizy.

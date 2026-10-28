@@ -50,6 +50,14 @@ knee_flexion_deg = 180.0 - theta_deg
 5. Jeśli wylosowana/wyznaczona klatka jest trudna, **zachowaj ją w zestawie** i oznacz odpowiednią flagą. Nie zastępuj jej łatwiejszą klatką bez udokumentowanej reguły.
 6. Po pilotażu sprawdź, czy próba obejmuje różne fazy cyklu biegu. Ewentualną zmianę metody próbkowania wprowadź przed anotacją całego zbioru i udokumentuj.
 
+**Implementacja:** znaczniki są środkami równych przedziałów między wskazanym
+początkiem i końcem. Najbliższa klatka musi należeć do tego zakresu; przy
+remisie wybierana jest wcześniejsza. Jeżeli kilka znaczników wskazuje tę samą
+klatkę, zachowujemy ją raz z najbliższym znacznikiem (wcześniejszym przy remisie),
+bez dobierania zamienników. Aplikacja raportuje mniejszą liczbę unikalnych
+klatek i zapisuje zakres, znaczniki oraz różnice czasów w CSV wyboru.
+Klatki bez detekcji MediaPipe lub bez kąta nie są odrzucane.
+
 **30 klatek na nagranie to przyjęta liczba startowa, a nie gwarancja reprezentatywności statystycznej.**
 
 ## 5. Definicje punktów

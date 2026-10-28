@@ -118,8 +118,15 @@ def _extraction_view() -> None:
         st.success(f"Przetworzono {result.frames} klatek; pozycję wykryto w {result.pose_found_pct:.1f}% klatek.")
     uploaded_csv = st.file_uploader("Lub wczytaj extracted_landmarks.csv", type=["csv"], key="extracted_csv")
     if uploaded_csv is not None:
-        st.session_state.extracted = pd.read_csv(uploaded_csv)
-        st.success("Wczytano dane ekstrakcji.")
+        signature = hashlib.sha256(uploaded_csv.getvalue()).hexdigest()
+        if st.session_state.get("loaded_extracted_csv_signature") != signature:
+            st.session_state.extracted = pd.read_csv(uploaded_csv)
+            st.session_state.loaded_extracted_csv_signature = signature
+            st.session_state.selected_frames = None
+            st.session_state.validation = None
+            st.success("Wczytano dane ekstrakcji.")
+    else:
+        st.session_state.pop("loaded_extracted_csv_signature", None)
 
 
 def _angle_view(data: pd.DataFrame | None) -> None:
@@ -233,19 +240,46 @@ def _overlay_view(data: pd.DataFrame | None) -> None:
 
 
 def _selection_view(data: pd.DataFrame | None) -> None:
-    """Render stratified reference-frame selection."""
+    """Select by time only, including frames where MediaPipe failed."""
     st.subheader("Wybór klatek referencyjnych")
-    if data is None:
+    if data is None or data.empty:
         st.info("Brak danych ekstrakcji.")
         return
-    count = st.number_input("Liczba klatek", min_value=3, max_value=max(3, len(data)), value=min(30, len(data)))
-    if st.button("Wybierz reprezentatywne klatki", icon=":material/grid_view:"):
-        selected = select_reference_frames(data, int(count))
-        st.session_state.selected_frames = selected
-        write_csv(selected, REFERENCE_DIR / "selected_reference_frames.csv")
+    st.caption("Próba główna: środki 30 równych przedziałów czasu i najbliższe klatki. "
+               "Wynik detekcji, visibility i kąt MediaPipe nie wpływają na wybór.")
+    times = pd.to_numeric(data["time_s"], errors="coerce")
+    if not np.isfinite(times).all() or (times < 0).any():
+        st.error("CSV zawiera nieprawidłowe czasy klatek.")
+        return
+    lower, upper = float(times.min()), float(times.max())
+    start = st.number_input("Początek fragmentu [s]", min_value=lower, max_value=upper,
+                            value=lower, format="%.6f", key="selection_start")
+    end = st.number_input("Koniec fragmentu [s]", min_value=lower, max_value=upper,
+                          value=upper, format="%.6f", key="selection_end")
+    count = st.number_input("Liczba znaczników czasu", min_value=1,
+                            max_value=max(30, len(data)), value=30, key="selection_count")
+    st.caption("Czas pochodzi z kolumny time_s w CSV. Zmiana ustawień wymaga ponownego wyboru klatek.")
+    if st.button("Wybierz klatki według czasu", icon=":material/grid_view:", key="select_reference"):
+        try:
+            selected = select_reference_frames(data, int(count), start_time_s=start, end_time_s=end)
+            st.session_state.selected_frames = selected
+            write_csv(selected, REFERENCE_DIR / "selected_reference_frames.csv")
+        except (ValueError, KeyError, TypeError) as error:
+            st.session_state.selected_frames = None
+            st.error(str(error))
     selected = st.session_state.selected_frames
+    if selected is not None and "selection_method" not in selected:
+        st.session_state.selected_frames = None
+        st.info("Poprzedni wybór klatek wymaga ponowienia według nowej metody czasowej.")
+        return
     if selected is not None:
-        st.dataframe(selected[["frame_number", "time_s", "knee_angle_raw", "min_visibility", "visibility_group", "angle_group"]], hide_index=True)
+        requested = int(selected["selection_requested_count"].iloc[0])
+        st.write(f"Wybrano {len(selected)} unikalnych klatek dla {requested} znaczników czasu.")
+        if len(selected) < requested:
+            st.warning("Część znaczników wskazała tę samą klatkę. Duplikaty pominięto bez zastępowania "
+                       "innymi klatkami. Rozszerz zakres lub zmniejsz liczbę znaczników.")
+        st.dataframe(selected[["frame_number", "time_s", "selection_index", "selection_target_time_s",
+                               "selection_time_error_s", "selection_start_s", "selection_end_s"]], hide_index=True)
 
 
 def _annotation_view() -> None:
@@ -253,7 +287,7 @@ def _annotation_view() -> None:
     st.subheader("Ręczna anotacja")
     selected = st.session_state.selected_frames
     video_path = st.session_state.video_path
-    if selected is None or not video_path:
+    if selected is None or selected.empty or not video_path:
         st.info("Wybierz klatki referencyjne i zachowaj dostęp do filmu źródłowego.")
         return
     frame_numbers = selected["frame_number"].astype(int).tolist()
