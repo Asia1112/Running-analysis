@@ -216,6 +216,9 @@ def process_video(
         data["knee_angle_raw"].to_numpy(), smoothing_method, smoothing_window
     )
     data["knee_flexion_smoothed_deg"] = 180.0 - data["knee_angle_smoothed"]
+    data["smoothing_method"] = smoothing_method
+    data["smoothing_window"] = smoothing_window
+    data["smoothing_gap_policy"] = "finite_segments_v1"
     data = add_quality_columns(data)
     csv_path = Path(output_csv)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,7 +230,8 @@ def process_video(
                 "model_sha256": file_sha256(model_path), "model_name": Path(model_path).name,
                 "fps": fps, "frames": len(data),
                 "image_width": int(data.image_width.iloc[0]), "image_height": int(data.image_height.iloc[0]),
-                "smoothing_method": smoothing_method, "smoothing_window": smoothing_window}
+                "smoothing_method": smoothing_method, "smoothing_window": smoothing_window,
+                "smoothing_gap_policy": "finite_segments_v1"}
     with csv_path.with_suffix(".metadata.json").open("x", encoding="utf-8") as stream:
         json.dump(metadata, stream, ensure_ascii=False, indent=2)
     return ExtractionResult(

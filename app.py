@@ -140,10 +140,12 @@ def _angle_chart(data: pd.DataFrame) -> None:
         value_vars=["knee_flexion_deg", "knee_flexion_smoothed_deg"],
         var_name="series", value_name="angle_deg",
     )
+    chart["segment"] = chart.groupby("series")["angle_deg"].transform(lambda values: (~np.isfinite(values)).cumsum())
     lines = alt.Chart(chart).mark_line().encode(
         x=alt.X("time_s:Q", title="Czas [s]"), y=alt.Y("angle_deg:Q", title="Zgięcie kolana 2D [°]"),
         color=alt.Color("series:N", title="Sygnał"),
         strokeDash=alt.StrokeDash("series:N"),
+        detail="segment:N",
         tooltip=[alt.Tooltip("time_s:Q", format=".3f"), alt.Tooltip("angle_deg:Q", format=".2f")],
     )
     suspicious = data[data["frame_quality_status"] != "reliable"]
@@ -277,10 +279,16 @@ def _angle_view(data: pd.DataFrame | None) -> None:
         st.info("Najpierw wykonaj lub wczytaj ekstrakcję.")
         return
     st.caption("Zgięcie 2D = 180° − kąt wewnętrzny. Wyprost: 0°. Obliczenia ze współrzędnych pikselowych.")
+    st.caption("Podstawą walidacji jest surowy kąt. Filtry są pomocnicze: mogą zmieniać minima i maksima. "
+               "Braki pozostają puste; filtrowanie nie przekracza przerw. Okno oznacza liczbę klatek, "
+               "a przy VFR nie ma stałej szerokości w sekundach.")
     method = st.segmented_control("Wygładzanie", ["median", "moving_average", "savgol"], default="median")
     window = st.number_input("Okno", min_value=3, max_value=21, value=5, step=2)
     data["knee_angle_smoothed"] = smooth_series(data["knee_angle_raw"].to_numpy(), method, int(window))
     data["knee_flexion_smoothed_deg"] = 180.0 - data["knee_angle_smoothed"]
+    data["smoothing_method"] = method
+    data["smoothing_window"] = int(window)
+    data["smoothing_gap_policy"] = "finite_segments_v1"
     updated = add_quality_columns(data)
     data[updated.columns] = updated
     _angle_chart(data)
@@ -292,7 +300,8 @@ def _angle_view(data: pd.DataFrame | None) -> None:
             "jumps_10": int(detect_angle_jumps(values, 10).sum()),
             "jumps_20": int(detect_angle_jumps(values, 20).sum()),
             "jumps_30": int(detect_angle_jumps(values, 30).sum()),
-            "minimum_deg": float(np.nanmin(values)), "maximum_deg": float(np.nanmax(values)),
+            "minimum_deg": float(np.min(values[np.isfinite(values)])) if np.isfinite(values).any() else np.nan,
+            "maximum_deg": float(np.max(values[np.isfinite(values)])) if np.isfinite(values).any() else np.nan,
         })
     st.dataframe(pd.DataFrame(comparison), hide_index=True)
 

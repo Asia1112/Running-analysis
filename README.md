@@ -347,6 +347,41 @@ funkcją `calculate_knee_angle()`.
 
 ## Metryki
 
+### Wygładzanie i brakujące pomiary
+
+Podstawą walidacji pozostaje **surowy kąt wyliczony z punktów pikselowych**.
+Wynik filtrowania jest zapisywany oddzielnie i służy do pomocniczego porównania
+przebiegu sygnału. Doboru filtra ani okna nie optymalizujemy pod zgodność
+z ręczną referencją. Wygładzanie może zmieniać minima, maksima i położenie
+ekstremów — nie traktujemy przefiltrowanych ekstremów jako wartości surowych.
+
+Wszystkie trzy filtry zachowują pozycje braków: NaN/inf na wejściu daje NaN
+na wyjściu. Każdy ciągły fragment poprawnych danych jest filtrowany osobno.
+Nie ma interpolacji przez lukę ani wpływu danych z drugiej strony luki,
+także w filtrze wielomianowym. Pusty sygnał, same braki i sygnał krótszy od
+okna zachowują dokładnie długość wejścia. Wykres przerywa linię na brakach.
+
+- Mediana i średnia używają wyśrodkowanego okna, skróconego na granicach fragmentu.
+- Filtr `savgol` dopasowuje lokalny wielomian tylko do danych w tym samym
+  fragmencie; krótkie fragmenty bez wystarczającej liczby próbek pozostawia
+  bez zmian. Na brzegach zmniejsza okno i w razie potrzeby stopień wielomianu.
+- Okno musi być dodatnią, nieparzystą liczbą całkowitą. Jest liczone w klatkach,
+  więc przy VFR nie oznacza stałej szerokości w sekundach. To pomocnicze
+  filtrowanie próbek, a nie filtr z ustaloną częstotliwością odcięcia w Hz.
+
+Nowe CSV i manifest zapisują `smoothing_method`, `smoothing_window` oraz
+`smoothing_gap_policy=finite_segments_v1`. Interfejs aktualizuje te pola
+przy zmianie ustawień; nie nadpisuje źródłowego CSV. Surowe współrzędne i kąty
+pozostają zachowane. Starsze kolumny wygładzone mogły wypełniać braki — do
+nowego porównania należy je przeliczyć z surowych danych.
+
+CLI `plot_angles.py` domyślnie pokazuje surowy sygnał. Opcjonalny filtr jest
+zawsze liczony ponownie, bez korzystania ze starej kolumny wygładzonej:
+
+```powershell
+.\.venv\Scripts\python.exe plot_angles.py --csv data\results\analyses\ANALYSIS_ID\extracted_landmarks.csv --smoothing median --window 5
+```
+
 Raportowane są MAE, RMSE, bias, mediana błędu bezwzględnego, odchylenie
 standardowe, zakres błędu oraz odsetek obserwacji z błędem do 3, 5 i 10 stopni.
 Wyniki można grupować według filmu, osoby i przedziału visibility. Dla biodra,
