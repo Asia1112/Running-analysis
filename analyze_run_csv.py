@@ -20,9 +20,11 @@ def main() -> None:
     args = parser.parse_args()
     try:
         reference = select_reference_session(read_reference_annotations(args.reference), args.annotator_id, args.session)
+        results = merge_with_reference(read_csv(args.extracted), reference,
+                                       annotator_id=reference.annotator_id.iloc[0],
+                                       session=reference.annotation_session.iloc[0])
     except ValueError as error:
         parser.error(str(error))
-    results = merge_with_reference(read_csv(args.extracted), reference)
     summary = grouped_statistics(results, ["video_id", "person_id"])
     summary["angle_definition"] = "knee_flexion_2d_deg"
     summary["annotator_id"] = reference.annotator_id.iloc[0]

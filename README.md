@@ -234,6 +234,21 @@ wielu sesjach podaj `--annotator-id annotator_01 --session IDENTYFIKATOR`;
 bez jednoznacznego wyboru program zatrzyma się przed zapisaniem wyników.
 Nie traktujemy powtórnych anotacji jako dodatkowych niezależnych klatek.
 
+Łączenie w `validation.merge_with_reference` wymaga relacji **one-to-one**
+po `video_id, person_id, frame_number, side`. Powielony klucz w ekstrakcji
+(także poza próbą referencyjną) lub w wybranej referencji zatrzymuje analizę
+z komunikatem wskazującym źródło i przykładowe klucze. Rekordy nie są
+automatycznie usuwane ani uśredniane. Puste identyfikatory, nieprawidłowa strona
+i niecałkowite/ujemne numery klatek również blokują porównanie.
+Kontrola działa także przy bezpośrednim wywołaniu funkcji: przy wielu parach
+anotator/sesja wymagany jest wybór argumentami `annotator_id` i `session`.
+Referencja zawierająca tylko jedną parę jest jednoznaczna bez tych argumentów.
+Starszy CSV bez pól anotatora lub sesji wymaga ich świadomego uzupełnienia.
+Po błędzie aplikacja unieważnia poprzedni wynik w pamięci i nie zapisuje
+nowego CSV; istniejące pliki wynikowe pozostają bez zmian.
+Łączenie nadal jest typu `inner`: zawiera wyłącznie pasujące klucze.
+Sam brak duplikatów nie potwierdza kompletności pokrycia klatek referencyjnych.
+
 Testy Python obejmują zachowanie sesji, ochronę przed zastąpieniem wpisu,
 awarię zapisu i przepływ stanu Streamlit. Testy JavaScript można uruchomić
 poleceniem `node --test tests/test_annotation_component.mjs` — sprawdzają
@@ -268,4 +283,4 @@ badaniem pozostają m.in. następujące problemy wykryte podczas przeglądu:
 
 Podstawowe testy jednostkowe nie potwierdzają jeszcze poprawności całego
 procesu badawczego. Kolejne etapy powinny objąć bezpieczne powiązanie danych
-z nagraniem, kontrolę łączenia rekordów i obsługę brakujących danych.
+z nagraniem, raportowanie kompletności dopasowania i obsługę brakujących danych.

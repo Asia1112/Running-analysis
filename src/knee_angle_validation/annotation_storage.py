@@ -63,6 +63,12 @@ def select_reference_session(data: pd.DataFrame, annotator_id: str | None = None
     if not {"annotator_id", "annotation_session"}.issubset(data.columns):
         raise ValueError("Referencja musi zawierać anotatora i sesję pomiarową.")
     selected = data.copy()
+    for key in ("annotator_id", "annotation_session"):
+        if selected[key].isna().any():
+            raise ValueError(f"Referencja: pole {key} nie może być puste.")
+        selected[key] = selected[key].astype(str).str.strip()
+        if selected[key].eq("").any():
+            raise ValueError(f"Referencja: pole {key} nie może być puste.")
     if annotator_id is not None:
         selected = selected.loc[selected.annotator_id.eq(annotator_id.strip())]
     if session is not None:

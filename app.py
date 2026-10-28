@@ -372,7 +372,12 @@ def _validation_view(data: pd.DataFrame | None) -> None:
         st.session_state.validation = None
         st.session_state.validation_reference_signature = reference_signature
     if st.button("Połącz i oblicz błędy", icon=":material/compare_arrows:"):
-        validation = merge_with_reference(data, reference)
+        st.session_state.validation = None
+        try:
+            validation = merge_with_reference(data, reference, annotator_id=pair[0], session=pair[1])
+        except ValueError as error:
+            st.error(str(error))
+            return
         st.session_state.validation = validation
         write_csv(validation, RESULTS_DIR / "validation_results.csv")
     validation = st.session_state.validation

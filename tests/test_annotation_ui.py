@@ -107,6 +107,14 @@ app._validation_view(st.session_state.test_data)
             at.button[0].click().run()
             self.assertFalse(at.exception)
             self.assertEqual(at.session_state.validation.annotation_session.tolist(), ['s2'])
+            output = Path(directory) / 'validation_results.csv'
+            previous = output.read_bytes()
+            at.session_state.test_data = pd.concat([at.session_state.test_data] * 2)
+            at.button[0].click().run()
+            self.assertFalse(at.exception)
+            self.assertIsNone(at.session_state.validation)
+            self.assertTrue(any('MediaPipe: powielone klucze' in error.value for error in at.error))
+            self.assertEqual(output.read_bytes(), previous)
 
 
 if __name__ == '__main__':

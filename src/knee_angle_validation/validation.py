@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from .knee_angle import add_pixel_angle_columns
+from .annotation_storage import select_reference_session
 
 
 JOIN_KEYS = ["video_id", "person_id", "frame_number", "side"]
@@ -17,15 +18,52 @@ def _point_distance(data: pd.DataFrame, point: str) -> pd.Series:
     )
 
 
-def merge_with_reference(extracted: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
-    """Inner-join extracted frames and manual references, then calculate errors."""
-    missing = [key for key in JOIN_KEYS if key not in extracted or key not in reference]
+def _unique_measurements(data: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Validate and normalize frame identities without discarding any records."""
+    if not data.columns.is_unique:
+        raise ValueError(f"{label}: powielone nazwy kolumn.")
+    missing = [key for key in JOIN_KEYS if key not in data]
     if missing:
-        raise ValueError(f"Missing join keys: {', '.join(missing)}")
+        raise ValueError(f"{label}: brak kluczy: {', '.join(missing)}")
+    normalized = data.copy()
+    for key in ("video_id", "person_id", "side"):
+        if normalized[key].isna().any():
+            raise ValueError(f"{label}: puste pole {key}.")
+        normalized[key] = normalized[key].astype(str).str.strip()
+        if normalized[key].eq("").any():
+            raise ValueError(f"{label}: puste pole {key}.")
+    frames = pd.to_numeric(normalized["frame_number"], errors="coerce")
+    if (not np.isfinite(frames).all() or (frames < 0).any()
+            or (frames % 1 != 0).any() or (frames >= 2**63).any()):
+        raise ValueError(f"{label}: numery klatek muszą być nieujemnymi liczbami całkowitymi.")
+    normalized["frame_number"] = frames.astype("int64")
+    if not normalized["side"].isin(["left", "right"]).all():
+        raise ValueError(f"{label}: strona musi mieć wartość left albo right.")
+    duplicates = normalized.duplicated(JOIN_KEYS, keep=False)
+    if duplicates.any():
+        examples = normalized.loc[duplicates, JOIN_KEYS].drop_duplicates().head(5).to_dict("records")
+        raise ValueError(f"{label}: powielone klucze pomiarów ({int(duplicates.sum())} wierszy). "
+                         f"Przykłady: {examples}. Nie usunięto ani nie uśredniono rekordów.")
+    return normalized
+
+
+def merge_with_reference(extracted: pd.DataFrame, reference: pd.DataFrame, *,
+                         annotator_id: str | None = None,
+                         session: str | None = None) -> pd.DataFrame:
+    """Compare unique frames against exactly one annotator/session, one-to-one.
+
+    Multiple reference sessions require explicit selection. A reference containing
+    just one pair is unambiguous. Duplicate measurements are always errors.
+    """
+    if not reference.columns.is_unique:
+        raise ValueError("Referencja: powielone nazwy kolumn.")
+    reference = select_reference_session(reference, annotator_id, session)
+    extracted = _unique_measurements(extracted, "MediaPipe")
+    reference = _unique_measurements(reference, "Referencja")
     # Always derive both methods from pixels, including older CSV inputs.
     extracted = add_pixel_angle_columns(extracted)
     reference = add_pixel_angle_columns(reference, reference=True)
-    merged = extracted.merge(reference, on=JOIN_KEYS, how="inner", validate="many_to_many",
+    merged = extracted.merge(reference, on=JOIN_KEYS, how="inner", validate="one_to_one",
                              suffixes=("_mediapipe", "_reference"))
     merged["angle_mediapipe"] = merged["knee_flexion_deg_mediapipe"]
     merged["angle_reference"] = merged["knee_flexion_deg_reference"]
